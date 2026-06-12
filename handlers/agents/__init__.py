@@ -33,16 +33,47 @@ log = logging.getLogger(__name__)
 _cli_available_cache: dict[str, bool] = {}
 
 
+_LOCAL_PROVIDER_PROBES: dict[str, str] = {
+    "ollama": "http://localhost:11434/api/tags",
+    "lmstudio": "http://localhost:1234/v1/models",
+}
+
+
+def _probe_local_provider(prefix: str) -> bool:
+    """Quick HTTP probe to confirm a local model server is reachable."""
+    url = _LOCAL_PROVIDER_PROBES.get(prefix)
+    if not url:
+        return True
+    from urllib.request import Request, urlopen
+
+    try:
+        with urlopen(Request(url, method="GET"), timeout=1) as resp:
+            return resp.status == 200
+    except Exception:
+        return False
+
+
 def _is_agent_available(agent_key: str) -> bool:
     """Check if the agent backend is available.
 
     For ACP agents (claude-code, gemini): checks if the CLI binary is in PATH.
-    For pydantic-ai agents (ollama:*, openai:*, etc.): always available
-    (pydantic-ai handles connection errors at runtime).
+    For local pydantic-ai providers (ollama:*, lmstudio:*): probes the server.
+    For cloud pydantic-ai providers (openai, anthropic, groq, openrouter):
+    assumed reachable; pydantic-ai surfaces auth/network errors at runtime.
     """
-    # Pydantic-ai models don't need a CLI binary
     if is_pydantic_ai_model(agent_key):
-        return True
+        if agent_key in _cli_available_cache:
+            return _cli_available_cache[agent_key]
+        prefix = agent_key.split(":", 1)[0]
+        available = _probe_local_provider(prefix)
+        _cli_available_cache[agent_key] = available
+        if not available:
+            log.warning(
+                "Local model server for %r is not reachable (agent_key=%s)",
+                prefix,
+                agent_key,
+            )
+        return available
 
     if agent_key in _cli_available_cache:
         return _cli_available_cache[agent_key]

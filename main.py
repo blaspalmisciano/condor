@@ -275,7 +275,7 @@ def register_handlers(application: Application) -> None:
     from handlers.dex import dex_callback_handler, lp_command
     from handlers.executors import executors_callback_handler, executors_command
     from handlers.portfolio import get_portfolio_callback_handler, portfolio_command
-    from handlers.routines import routines_callback_handler, routines_command
+    from handlers.routines import routines_callback_handler, routines_command, stop_command
     from handlers.trading import trade_command as unified_trade_command
     from handlers.trading.router import unified_trade_callback_handler
 
@@ -295,6 +295,7 @@ def register_handlers(application: Application) -> None:
     )  # Alias for /trade
     application.add_handler(CommandHandler("lp", lp_command))
     application.add_handler(CommandHandler("routines", routines_command))
+    application.add_handler(CommandHandler("stop", stop_command))
     application.add_handler(CommandHandler("executors", executors_command))
     application.add_handler(CommandHandler("agent", agent_command))
 
@@ -339,6 +340,13 @@ def register_handlers(application: Application) -> None:
 
     application.add_handler(
         CallbackQueryHandler(admin_callback_handler, pattern="^admin:")
+    )
+
+    # Add volume_drop_alert routine callback handler
+    from handlers.volume_alert_callbacks import volume_alert_callback
+
+    application.add_handler(
+        CallbackQueryHandler(volume_alert_callback, pattern="^volalert:")
     )
 
     # Add callback query handler for portfolio settings
@@ -614,8 +622,13 @@ async def _run_dual(application: Application) -> None:
     from condor.web.app import create_app
     from condor.web.ws_manager import get_ws_manager
 
-    # Initialize and start the Telegram application
+    # Initialize and start the Telegram application.
+    # Note: PTB's `post_init` hook is only auto-invoked by run_polling()/
+    # run_webhook(). Since we manage the lifecycle manually (to co-run the
+    # web server), we have to call it ourselves — otherwise scheduled
+    # routines never get restored after a restart.
     await application.initialize()
+    await post_init(application)
     await application.updater.start_polling(allowed_updates=Update.ALL_TYPES)
     await application.start()
 
@@ -666,9 +679,13 @@ async def _run_dual(application: Application) -> None:
     server.should_exit = True
     await web_task
 
-    # Graceful Telegram shutdown
+    # Graceful Telegram shutdown.
+    # post_shutdown — same caveat as post_init: only auto-fired by
+    # run_polling()/run_webhook(), so we call it manually before tearing
+    # the application down.
     await application.updater.stop()
     await application.stop()
+    await post_shutdown(application)
     await application.shutdown()
 
 

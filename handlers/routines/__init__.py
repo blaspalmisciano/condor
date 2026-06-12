@@ -20,7 +20,12 @@ from telegram.ext import CallbackContext, ContextTypes
 
 from handlers import clear_all_input_states
 from condor.routine_store import get_routine_store
-from routines.base import discover_routines, get_routine, get_routine_by_state, normalize_result
+from routines.base import (
+    discover_routines,
+    get_routine,
+    get_routine_by_state,
+    normalize_result,
+)
 from utils.auth import restricted
 from utils.telegram_formatters import escape_markdown_v2
 
@@ -236,6 +241,9 @@ async def _execute_routine(
     active_server: str | None = None,
 ) -> tuple[str, float]:
     """Execute a routine and return (result, duration)."""
+    # Force-reload so on-disk edits to the routine module always take effect on
+    # the next run, even if the user hasn't reopened the routines menu.
+    discover_routines(force_reload=True)
     routine = get_routine(routine_name)
     if not routine:
         return "Routine not found", 0
@@ -284,6 +292,8 @@ async def _run_continuous_routine(
     active_server: str | None = None,
 ) -> None:
     """Run a continuous routine as an asyncio task."""
+    # Force-reload so on-disk edits to the routine module always take effect.
+    discover_routines(force_reload=True)
     routine = get_routine(routine_name)
     if not routine:
         logger.error(f"Routine {routine_name} not found")
@@ -863,6 +873,7 @@ async def _show_detail(
         "routine": routine_name,
         "fields": fields,
     }
+    context.user_data["routines_view"] = "detail"
 
     msg = update.callback_query.message if update.callback_query else None
     if msg:
@@ -872,23 +883,19 @@ async def _show_detail(
     await _edit_or_send(update, text, InlineKeyboardMarkup(keyboard))
 
 
-async def _show_schedule_menu(
-    update: Update, context: ContextTypes.DEFAULT_TYPE, routine_name: str
-) -> None:
-    """Show schedule options menu."""
-    routine = get_routine(routine_name)
-    if not routine:
-        return
+def _build_schedule_view(routine_name: str, draft: dict, fields: dict) -> tuple[str, InlineKeyboardMarkup]:
+    """Build the (text, keyboard) for the schedule menu, with Config visible & editable."""
+    config_lines = [f"{k}={draft.get(k, v['default'])}" for k, v in fields.items()]
 
     text = (
         f"⏱️ *Schedule: {escape_markdown_v2(_display_name(routine_name))}*\n"
         f"━━━━━━━━━━━━━━━━━━━━━\n\n"
-        f"Choose how often to run this routine\\.\n"
-        f"Config will be frozen at schedule time\\.\n"
-        f"Results will be sent as messages\\."
+        f"┌─ Config \\(frozen at schedule time\\) ─\n"
+        f"```\n{chr(10).join(config_lines)}\n```\n"
+        f"└─ _✏️ send `key=value` to edit before scheduling_\n\n"
+        f"Then pick a cadence below\\."
     )
 
-    # Interval buttons - 3 per row
     row1 = [
         InlineKeyboardButton(
             label, callback_data=f"routines:interval:{routine_name}:{secs}"
@@ -902,22 +909,72 @@ async def _show_schedule_menu(
         for label, secs in SCHEDULE_PRESETS[3:6]
     ]
 
-    keyboard = [
-        row1,
-        row2,
+    keyboard = InlineKeyboardMarkup(
         [
-            InlineKeyboardButton(
-                "📅 Daily...", callback_data=f"routines:daily:{routine_name}"
-            )
-        ],
-        [
-            InlineKeyboardButton(
-                "« Cancel", callback_data=f"routines:select:{routine_name}"
-            )
-        ],
-    ]
+            row1,
+            row2,
+            [
+                InlineKeyboardButton(
+                    "📅 Daily...", callback_data=f"routines:daily:{routine_name}"
+                )
+            ],
+            [
+                InlineKeyboardButton(
+                    "« Cancel", callback_data=f"routines:select:{routine_name}"
+                )
+            ],
+        ]
+    )
+    return text, keyboard
 
-    await _edit_or_send(update, text, InlineKeyboardMarkup(keyboard))
+
+async def _show_schedule_menu(
+    update: Update, context: ContextTypes.DEFAULT_TYPE, routine_name: str
+) -> None:
+    """Show schedule options menu with editable Config."""
+    routine = get_routine(routine_name)
+    if not routine:
+        return
+
+    fields = routine.get_fields()
+    draft = _get_draft(context, routine_name)
+    text, keyboard = _build_schedule_view(routine_name, draft, fields)
+
+    # Allow key=value edits to land here (and route refresh back to schedule view)
+    context.user_data["routines_state"] = "editing"
+    context.user_data["routines_editing"] = {"routine": routine_name, "fields": fields}
+    context.user_data["routines_view"] = "schedule"
+
+    msg = update.callback_query.message if update.callback_query else None
+    if msg:
+        context.user_data["routines_msg_id"] = msg.message_id
+        context.user_data["routines_chat_id"] = msg.chat_id
+
+    await _edit_or_send(update, text, keyboard)
+
+
+async def _refresh_schedule_msg(
+    context: CallbackContext, chat_id: int, msg_id: int, routine_name: str
+) -> None:
+    """Re-render the schedule view in place (after a key=value edit)."""
+    routine = get_routine(routine_name)
+    if not routine:
+        return
+    user_data = context.application.user_data.get(chat_id, {})
+    drafts = user_data.get("routine_drafts", {})
+    draft = drafts.get(routine_name) or routine.get_default_config().model_dump()
+    fields = routine.get_fields()
+    text, keyboard = _build_schedule_view(routine_name, draft, fields)
+    try:
+        await context.bot.edit_message_text(
+            chat_id=chat_id,
+            message_id=msg_id,
+            text=text,
+            parse_mode="MarkdownV2",
+            reply_markup=keyboard,
+        )
+    except Exception as e:
+        logger.warning("Failed to refresh schedule view: %s", e)
 
 
 async def _show_daily_menu(
@@ -1339,11 +1396,15 @@ async def _process_config(
     )
     asyncio.create_task(_delete_after(msg, 2))
 
-    # Refresh detail view
+    # Refresh whichever view the user is currently looking at
     msg_id = context.user_data.get("routines_msg_id")
     chat_id = context.user_data.get("routines_chat_id")
+    view = context.user_data.get("routines_view", "detail")
     if msg_id and chat_id:
-        await _refresh_detail_msg(context, chat_id, msg_id, routine_name)
+        if view == "schedule":
+            await _refresh_schedule_msg(context, chat_id, msg_id, routine_name)
+        else:
+            await _refresh_detail_msg(context, chat_id, msg_id, routine_name)
 
 
 async def _process_daily_time(
@@ -1429,6 +1490,13 @@ async def routines_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -
     """Handle /routines command."""
     clear_all_input_states(context)
     await _show_menu(update, context)
+
+
+@restricted
+async def stop_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Handle /stop — show running routine instances with one-tap stop buttons."""
+    clear_all_input_states(context)
+    await _show_tasks(update, context)
 
 
 @restricted

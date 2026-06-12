@@ -120,14 +120,107 @@ window.addEventListener('resize', function() {{
 """
 
 
+_INLINE_PATTERNS = [
+    (re.compile(r"\*\*(.+?)\*\*"), r"<strong>\1</strong>"),
+    (re.compile(r"(?<!\w)_(.+?)_(?!\w)"), r"<em>\1</em>"),
+    (re.compile(r"\*(.+?)\*"), r"<em>\1</em>"),
+    (re.compile(r"`([^`]+?)`"), r"<code>\1</code>"),
+]
+
+
+def _escape_html(text: str) -> str:
+    return text.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+
+
+def _render_inline(text: str) -> str:
+    """Inline markdown → HTML. Escapes HTML first, then applies bold/italic/code."""
+    out = _escape_html(text)
+    for pattern, repl in _INLINE_PATTERNS:
+        out = pattern.sub(repl, out)
+    return out
+
+
+def _fallback_md_to_html(text: str) -> str:
+    """Minimal stdlib-only markdown renderer.
+
+    Used when the `markdown` package isn't importable (e.g., bot launched with
+    a Python that doesn't have it). Handles the subset our routines actually
+    use: ATX headings (# .. ####), **bold**, _italic_, `inline code`, fenced
+    code blocks (```), and `-`/`*` lists. Paragraphs are split on blank lines.
+    """
+    lines = text.replace("\r\n", "\n").split("\n")
+    out: list[str] = []
+    i = 0
+    in_list = False
+
+    def close_list():
+        nonlocal in_list
+        if in_list:
+            out.append("</ul>")
+            in_list = False
+
+    while i < len(lines):
+        line = lines[i]
+        stripped = line.strip()
+
+        if stripped.startswith("```"):
+            close_list()
+            i += 1
+            buf: list[str] = []
+            while i < len(lines) and not lines[i].strip().startswith("```"):
+                buf.append(lines[i])
+                i += 1
+            i += 1  # skip closing fence
+            out.append(f"<pre><code>{_escape_html(chr(10).join(buf))}</code></pre>")
+            continue
+
+        m = re.match(r"^(#{1,4})\s+(.*)$", stripped)
+        if m:
+            close_list()
+            level = len(m.group(1))
+            out.append(f"<h{level}>{_render_inline(m.group(2))}</h{level}>")
+            i += 1
+            continue
+
+        m = re.match(r"^[-*]\s+(.*)$", stripped)
+        if m:
+            if not in_list:
+                out.append("<ul>")
+                in_list = True
+            out.append(f"<li>{_render_inline(m.group(1))}</li>")
+            i += 1
+            continue
+
+        if not stripped:
+            close_list()
+            i += 1
+            continue
+
+        close_list()
+        # Collect consecutive non-blank, non-special lines into one paragraph
+        para: list[str] = [stripped]
+        i += 1
+        while i < len(lines):
+            nxt = lines[i].strip()
+            if not nxt or nxt.startswith(("#", "```", "- ", "* ")):
+                break
+            para.append(nxt)
+            i += 1
+        out.append(f"<p>{_render_inline(' '.join(para))}</p>")
+
+    close_list()
+    return "\n".join(out)
+
+
 def _md_to_html(text: str) -> str:
-    """Convert markdown to HTML, falling back to <pre> if library fails."""
+    """Convert markdown to HTML. Prefers `markdown` lib; falls back to a minimal
+    stdlib renderer if the package isn't importable in this interpreter."""
     try:
         import markdown
         return markdown.markdown(text, extensions=["fenced_code", "tables"])
-    except Exception:
-        escaped = text.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
-        return f"<pre style='white-space:pre-wrap'>{escaped}</pre>"
+    except Exception as e:
+        logger.warning(f"markdown library unavailable ({e!r}); using stdlib fallback renderer")
+        return _fallback_md_to_html(text)
 
 
 def _slugify(text: str) -> str:
