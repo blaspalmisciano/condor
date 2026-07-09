@@ -1,4 +1,4 @@
-import { useMutation, useQuery } from "@tanstack/react-query";
+import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import React, { useCallback, useEffect, useMemo, useState } from "react";
 import { useNavigate, useSearchParams } from "react-router-dom";
 import {
@@ -6,19 +6,22 @@ import {
   ArrowUpDown,
   BarChart3,
   CheckCircle,
+  Copy,
   Grid3X3,
   Layers,
   Loader2,
   Rocket,
   Settings2,
   TrendingUp,
+  X,
 } from "lucide-react";
 
+import { NoServerCard } from "@/components/NoServerCard";
 import { ExchangeSelector } from "@/components/market/ExchangeSelector";
 import { PairSelector, useTradingRules } from "@/components/market/PairSelector";
 import { PriceTicker } from "@/components/market/PriceTicker";
 import { MarketDepthPanel } from "@/components/market/MarketDepthPanel";
-import { GridChart } from "@/components/grid/GridChart";
+import { TradeChart } from "@/components/trade/TradeChart";
 import { GridConfigPanel, useGridValidation } from "@/components/grid/GridConfigPanel";
 import { PositionConfigPanel, usePositionConfig } from "@/components/executor/PositionConfigPanel";
 import { OrderConfigPanel, useOrderConfig } from "@/components/executor/OrderConfigPanel";
@@ -27,127 +30,20 @@ import { TradeBottomPane } from "@/components/trade/TradeBottomPane";
 import { useServer } from "@/hooks/useServer";
 import { useCondorWebSocket } from "@/hooks/useWebSocket";
 import { useMainControllerData } from "@/hooks/useMainControllerData";
+import { useRates } from "@/hooks/useRates";
+import { useResizeDrag } from "@/hooks/useResizeDrag";
 import { api } from "@/lib/api";
+import { candleStore } from "@/lib/candle-store";
 import type { ExecutorType } from "@/components/executor/types";
 import {
-  type GridState,
-  type GridAction,
+  gridReducer,
   isSpotConnector,
-} from "@/pages/CreateGridExecutor";
-
-// ── Grid state management (reuse from CreateGridExecutor) ──
-
-const GRID_DEFAULTS: GridState = {
-  connector: "binance_perpetual",
-  pair: "BTC-USDT",
-  interval: "5m",
-  lookbackSeconds: 3 * 86400,
-  side: 1,
-  start_price: 0,
-  end_price: 0,
-  limit_price: 0,
-  total_amount_quote: 300,
-  min_order_amount_quote: 10,
-  min_spread_between_orders: 0.0001,
-  max_open_orders: 5,
-  max_orders_per_batch: 2,
-  order_frequency: 1,
-  leverage: 10,
-  take_profit: 0.0002,
-  open_order_type: 2,
-  take_profit_order_type: 2,
-  activation_bounds: 0.05,
-  keep_position: false,
-  coerce_tp_to_step: false,
-  activePickField: null,
-  showAdvanced: false,
-};
-
-const GRID_STORAGE_KEY = "condor_grid_defaults";
-
-const GRID_PERSISTED_FIELDS: (keyof GridState)[] = [
-  "connector", "pair", "interval", "lookbackSeconds", "side",
-  "total_amount_quote", "min_order_amount_quote", "min_spread_between_orders",
-  "max_open_orders", "max_orders_per_batch", "order_frequency", "leverage",
-  "take_profit", "open_order_type", "take_profit_order_type",
-  "activation_bounds", "keep_position", "coerce_tp_to_step",
-];
-
-const LAST_MARKET_KEY = "condor_last_market";
-
-function loadGridDefaults(): GridState {
-  try {
-    const raw = localStorage.getItem(GRID_STORAGE_KEY);
-    const merged = raw ? { ...GRID_DEFAULTS } : { ...GRID_DEFAULTS };
-    if (raw) {
-      const saved = JSON.parse(raw);
-      for (const key of GRID_PERSISTED_FIELDS) {
-        if (key in saved && saved[key] !== undefined) {
-          (merged as Record<string, unknown>)[key] = saved[key];
-        }
-      }
-    }
-    // Override connector/pair from last-used market
-    try {
-      const market = localStorage.getItem(LAST_MARKET_KEY);
-      if (market) {
-        const { connector, pair } = JSON.parse(market);
-        if (connector) merged.connector = connector;
-        if (pair) merged.pair = pair;
-      }
-    } catch { /* ok */ }
-    return merged;
-  } catch {
-    return GRID_DEFAULTS;
-  }
-}
-
-function saveGridDefaults(state: GridState) {
-  const toSave: Record<string, unknown> = {};
-  for (const key of GRID_PERSISTED_FIELDS) toSave[key] = state[key];
-  localStorage.setItem(GRID_STORAGE_KEY, JSON.stringify(toSave));
-}
-
-function gridReducer(state: GridState, action: GridAction): GridState {
-  switch (action.type) {
-    case "SET_FIELD": {
-      const next = { ...state, [action.field]: action.value };
-      if (action.field === "leverage" && isSpotConnector(next.connector)) {
-        next.leverage = 1;
-      }
-      return next;
-    }
-    case "SET_CONNECTOR": {
-      const spot = isSpotConnector(action.value);
-      return {
-        ...state,
-        connector: action.value,
-        start_price: 0,
-        end_price: 0,
-        limit_price: 0,
-        leverage: spot ? 1 : state.leverage,
-      };
-    }
-    case "SET_PAIR":
-      return { ...state, pair: action.value, start_price: 0, end_price: 0, limit_price: 0 };
-    default:
-      return state;
-  }
-}
-
-// ── Intervals ──
-
-const INTERVALS = ["1m", "5m", "15m", "1h", "4h", "1d"];
-
-const LOOKBACK_OPTIONS: { label: string; seconds: number }[] = [
-  { label: "1h", seconds: 3600 },
-  { label: "6h", seconds: 6 * 3600 },
-  { label: "1d", seconds: 86400 },
-  { label: "3d", seconds: 3 * 86400 },
-  { label: "7d", seconds: 7 * 86400 },
-  { label: "14d", seconds: 14 * 86400 },
-  { label: "30d", seconds: 30 * 86400 },
-];
+  loadGridDefaults,
+  saveGridDefaults,
+  LAST_MARKET_KEY,
+  INTERVALS,
+  LOOKBACK_OPTIONS,
+} from "@/lib/gridExecutor";
 
 // ── Type tabs config ──
 
@@ -170,6 +66,7 @@ const TYPE_LABELS: Record<ExecutorType, string> = {
 export function CreateExecutor() {
   const { server } = useServer();
   const navigate = useNavigate();
+  const queryClient = useQueryClient();
   const [searchParams, setSearchParams] = useSearchParams();
 
   // Executor type from URL param or default to grid
@@ -184,7 +81,7 @@ export function CreateExecutor() {
   };
 
   // ── Grid state (always initialized for hooks rules) ──
-  const [gridState, gridDispatch] = React.useReducer(gridReducer, undefined, loadGridDefaults);
+  const [gridState, gridDispatch] = React.useReducer(gridReducer, undefined, () => loadGridDefaults(true));
   const gridValidation = useGridValidation(gridState);
 
   // ── Other executor configs ──
@@ -216,45 +113,31 @@ export function CreateExecutor() {
     }
   }, []); // eslint-disable-line react-hooks/exhaustive-deps
 
-  const [successId, setSuccessId] = useState<string | null>(null);
+  const [successInfo, setSuccessInfo] = useState<{ id: string; type: ExecutorType; connector: string; pair: string } | null>(null);
   const [rightPanel, setRightPanel] = useState<"config" | "depth">("config");
   const [rightPanelWidth, setRightPanelWidth] = useState(288);
   const [bottomPaneHeight, setBottomPaneHeight] = useState(200);
   const [selectedExecutorId, setSelectedExecutorId] = useState<string | null>(null);
 
-  const startHDrag = useCallback((e: React.MouseEvent) => {
-    e.preventDefault();
-    const startX = e.clientX;
-    const startW = rightPanelWidth;
-    document.body.style.cursor = "col-resize";
-    const onMove = (ev: MouseEvent) => {
-      setRightPanelWidth(Math.max(260, Math.min(500, startW + (startX - ev.clientX))));
-    };
-    const onUp = () => {
-      document.body.style.cursor = "";
-      document.removeEventListener("mousemove", onMove);
-      document.removeEventListener("mouseup", onUp);
-    };
-    document.addEventListener("mousemove", onMove);
-    document.addEventListener("mouseup", onUp);
-  }, [rightPanelWidth]);
+  const { onMouseDown: startHDrag } = useResizeDrag({
+    axis: "x",
+    value: rightPanelWidth,
+    onChange: setRightPanelWidth,
+    min: 260,
+    max: 500,
+    direction: "inverted",
+    cursor: "col-resize",
+  });
 
-  const startVDrag = useCallback((e: React.MouseEvent) => {
-    e.preventDefault();
-    const startY = e.clientY;
-    const startH = bottomPaneHeight;
-    document.body.style.cursor = "row-resize";
-    const onMove = (ev: MouseEvent) => {
-      setBottomPaneHeight(Math.max(100, Math.min(500, startH + (startY - ev.clientY))));
-    };
-    const onUp = () => {
-      document.body.style.cursor = "";
-      document.removeEventListener("mousemove", onMove);
-      document.removeEventListener("mouseup", onUp);
-    };
-    document.addEventListener("mousemove", onMove);
-    document.addEventListener("mouseup", onUp);
-  }, [bottomPaneHeight]);
+  const { onMouseDown: startVDrag } = useResizeDrag({
+    axis: "y",
+    value: bottomPaneHeight,
+    onChange: setBottomPaneHeight,
+    min: 100,
+    max: 500,
+    direction: "inverted",
+    cursor: "row-resize",
+  });
 
   const { data: connectors = [] } = useQuery({
     queryKey: ["connected-exchanges", server],
@@ -274,6 +157,19 @@ export function CreateExecutor() {
     useMainControllerData(server, connector, pair);
 
   const rulesData = useTradingRules(server ?? "", connector);
+
+  // Currency conversion for chart tooltip values
+  const quoteCurrency = pair.split("-")[1] || "USDT";
+  const { formatPnlValue, formatValue } = useRates([quoteCurrency]);
+  const convertPnl = useCallback((val: number) => formatPnlValue(val, quoteCurrency), [formatPnlValue, quoteCurrency]);
+  const convertValue = useCallback((val: number) => formatValue(val, quoteCurrency), [formatValue, quoteCurrency]);
+
+  // Load candles for an executor that's outside the current range
+  const handleRequestCandleRange = useCallback((startTime: number) => {
+    if (!server) return;
+    const newLookback = Math.ceil(Date.now() / 1000 - startTime) + 3600; // +1h padding
+    gridDispatch({ type: "SET_FIELD", field: "lookbackSeconds", value: newLookback });
+  }, [server]);
 
   // Persist last-used connector/pair to localStorage & clear executor selection
   useEffect(() => {
@@ -441,15 +337,18 @@ export function CreateExecutor() {
         case "order": orderConfig.save(); break;
         case "dca": dcaConfig.save(); break;
       }
-      setSuccessId(data.executor_id);
-      // Auto-dismiss success toast after 2.5s — stay on this page
-      // so the new executor appears in the bottom pane via WS
-      setTimeout(() => setSuccessId(null), 2500);
+      // Show success modal
+      setSuccessInfo({ id: data.executor_id, type: executorType, connector, pair });
+      // Invalidate executor queries so the new one appears immediately
+      queryClient.invalidateQueries({ queryKey: ["executors", server, "main", pair] });
+      queryClient.invalidateQueries({ queryKey: ["consolidated-positions", server] });
+      // Auto-select the new executor in the bottom pane
+      setSelectedExecutorId(data.executor_id);
     },
   });
 
   if (!server) {
-    return <p className="p-6 text-[var(--color-text-muted)]">Select a server</p>;
+    return <NoServerCard message="Select a server from the sidebar to create an executor." />;
   }
 
   return (
@@ -530,7 +429,7 @@ export function CreateExecutor() {
         {/* Chart + Bottom Pane */}
         <div className="min-w-0 flex-1 flex flex-col">
           <div className="flex-1 min-h-0 overflow-hidden bg-[var(--color-surface)]">
-            <GridChart
+            <TradeChart
               key={`${connector}:${pair}:${gridState.interval}`}
               server={server}
               connector={connector}
@@ -550,6 +449,9 @@ export function CreateExecutor() {
               executorOverlays={mainOverlays}
               positions={mainPositions}
               selectedExecutorId={selectedExecutorId}
+              convertValue={convertValue}
+              convertPnl={convertPnl}
+              onExecutorDeselect={() => setSelectedExecutorId(null)}
             />
           </div>
           {/* Horizontal resize handle */}
@@ -568,7 +470,20 @@ export function CreateExecutor() {
               pair={pair}
               isSpot={isSpot}
               selectedExecutorId={selectedExecutorId}
-              onExecutorSelect={(ex) => setSelectedExecutorId(ex?.id ?? null)}
+              onExecutorSelect={(ex) => {
+                setSelectedExecutorId(ex?.id ?? null);
+                // If this executor is older than current candle range, expand lookback
+                if (ex && ex.timestamp > 0) {
+                  const key = `candles:${server}:${connector}:${pair}:${gridState.interval}`;
+                  const candles = candleStore.getCandles(key);
+                  if (candles.length > 0) {
+                    const minTime = candles[0].timestamp;
+                    if (ex.timestamp < minTime) {
+                      handleRequestCandleRange(ex.timestamp);
+                    }
+                  }
+                }
+              }}
             />
           </div>
         </div>
@@ -634,16 +549,16 @@ export function CreateExecutor() {
               {/* Config Panel */}
               <div className="flex-1 overflow-y-auto">
                 {executorType === "grid" && (
-                  <GridConfigPanel state={gridState} dispatch={gridDispatch} currentPrice={currentPrice} isSpot={isSpot} />
+                  <GridConfigPanel state={gridState} dispatch={gridDispatch} currentPrice={currentPrice} isSpot={isSpot} quoteCurrency={pair?.split("-")[1] || "USDT"} />
                 )}
                 {executorType === "position" && (
-                  <PositionConfigPanel state={positionConfig.state} dispatch={positionConfig.dispatch} currentPrice={currentPrice} isSpot={isSpot} pair={pair} />
+                  <PositionConfigPanel state={positionConfig.state} dispatch={positionConfig.dispatch} validation={positionConfig.validation} currentPrice={currentPrice} isSpot={isSpot} pair={pair} />
                 )}
                 {executorType === "order" && (
-                  <OrderConfigPanel state={orderConfig.state} dispatch={orderConfig.dispatch} currentPrice={currentPrice} isSpot={isSpot} pair={pair} />
+                  <OrderConfigPanel state={orderConfig.state} dispatch={orderConfig.dispatch} validation={orderConfig.validation} currentPrice={currentPrice} isSpot={isSpot} pair={pair} />
                 )}
                 {executorType === "dca" && (
-                  <DCAConfigPanel state={dcaConfig.state} dispatch={dcaConfig.dispatch} currentPrice={currentPrice} isSpot={isSpot} pair={pair} />
+                  <DCAConfigPanel state={dcaConfig.state} dispatch={dcaConfig.dispatch} validation={dcaConfig.validation} currentPrice={currentPrice} isSpot={isSpot} pair={pair} />
                 )}
               </div>
 
@@ -674,13 +589,68 @@ export function CreateExecutor() {
         </div>
       </div>
 
-      {/* Success toast */}
-      {successId && (
-        <div className="absolute bottom-16 left-1/2 z-50 -translate-x-1/2">
-          <div className="flex items-center gap-2 rounded-lg border border-[var(--color-green)]/30 bg-[var(--color-surface)] px-4 py-2.5 shadow-2xl shadow-black/40">
-            <CheckCircle className="h-4 w-4 text-[var(--color-green)]" />
-            <span className="text-xs font-medium text-[var(--color-text)]">{TYPE_LABELS[executorType]} Created</span>
-            <span className="font-mono text-[10px] text-[var(--color-text-muted)]">{successId.slice(0, 8)}</span>
+      {/* Success modal */}
+      {successInfo && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 backdrop-blur-sm">
+          <div className="relative w-[360px] rounded-xl border border-[var(--color-green)]/30 bg-[var(--color-surface)] p-6 shadow-2xl shadow-black/40 animate-in fade-in zoom-in-95 duration-200">
+            {/* Close button */}
+            <button
+              onClick={() => setSuccessInfo(null)}
+              className="absolute right-3 top-3 rounded p-1 text-[var(--color-text-muted)] hover:bg-[var(--color-surface-hover)] hover:text-[var(--color-text)]"
+            >
+              <X className="h-4 w-4" />
+            </button>
+
+            {/* Icon */}
+            <div className="mb-4 flex justify-center">
+              <div className="flex h-12 w-12 items-center justify-center rounded-full bg-[var(--color-green)]/15">
+                <CheckCircle className="h-6 w-6 text-[var(--color-green)]" />
+              </div>
+            </div>
+
+            {/* Title */}
+            <h3 className="mb-1 text-center text-sm font-semibold text-[var(--color-text)]">
+              {TYPE_LABELS[successInfo.type]} Created
+            </h3>
+            <p className="mb-4 text-center text-[11px] text-[var(--color-text-muted)]">
+              Successfully deployed on {successInfo.connector}
+            </p>
+
+            {/* Details */}
+            <div className="mb-4 space-y-2 rounded-lg border border-[var(--color-border)] bg-[var(--color-bg)] p-3">
+              <div className="flex items-center justify-between text-[11px]">
+                <span className="text-[var(--color-text-muted)]">Executor ID</span>
+                <div className="flex items-center gap-1.5">
+                  <span className="font-mono text-[var(--color-text)]">{successInfo.id.slice(0, 12)}…</span>
+                  <button
+                    onClick={() => navigator.clipboard.writeText(successInfo.id)}
+                    className="rounded p-0.5 text-[var(--color-text-muted)] hover:text-[var(--color-text)]"
+                    title="Copy full ID"
+                  >
+                    <Copy className="h-3 w-3" />
+                  </button>
+                </div>
+              </div>
+              <div className="flex items-center justify-between text-[11px]">
+                <span className="text-[var(--color-text-muted)]">Pair</span>
+                <span className="font-mono text-[var(--color-text)]">{successInfo.pair}</span>
+              </div>
+              <div className="flex items-center justify-between text-[11px]">
+                <span className="text-[var(--color-text-muted)]">Status</span>
+                <span className="inline-flex items-center gap-1 rounded-full bg-[var(--color-green)]/15 px-1.5 py-0.5 text-[9px] font-bold text-[var(--color-green)]">
+                  <span className="h-1.5 w-1.5 rounded-full bg-[var(--color-green)] animate-pulse" />
+                  ACTIVE
+                </span>
+              </div>
+            </div>
+
+            {/* Action */}
+            <button
+              onClick={() => setSuccessInfo(null)}
+              className="w-full rounded-lg bg-[var(--color-primary)] px-4 py-2 text-xs font-semibold text-white transition-colors hover:brightness-110"
+            >
+              Continue Trading
+            </button>
           </div>
         </div>
       )}

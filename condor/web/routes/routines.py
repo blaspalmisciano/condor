@@ -2,16 +2,20 @@
 
 from __future__ import annotations
 
+import inspect
 import logging
+from pathlib import Path
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 from fastapi.responses import Response
 from pydantic import BaseModel
 
+from condor import routine_hooks
 from condor.reports import list_reports
 from condor.routine_store import get_routine_store
 from condor.web.auth import get_current_user
 from condor.web.models import WebUser
+from config_manager import get_config_manager
 
 log = logging.getLogger(__name__)
 router = APIRouter(prefix="/routines", tags=["routines"])
@@ -42,6 +46,16 @@ class ScheduleRequestV2(BaseModel):
     interval_sec: int = 300
 
 
+class HookTelegram(BaseModel):
+    enabled: bool = False
+    chat_ids: list[str] = []
+
+
+class HooksRequest(BaseModel):
+    telegram: HookTelegram = HookTelegram()
+    trigger: str = "success"
+
+
 # ── Routes ──
 
 
@@ -70,7 +84,9 @@ async def get_instance(instance_id: str, user: WebUser = Depends(get_current_use
 
 
 @router.get("/instances/{instance_id}/image")
-async def get_instance_image(instance_id: str, user: WebUser = Depends(get_current_user)):
+async def get_instance_image(
+    instance_id: str, user: WebUser = Depends(get_current_user)
+):
     """Serve the chart PNG for an instance result."""
     store = get_routine_store()
     result = store.get_result(instance_id)
@@ -87,6 +103,9 @@ async def run_routine(
     user: WebUser = Depends(get_current_user),
 ):
     """Execute a one-shot routine. Returns instance_id for polling."""
+    cm = get_config_manager()
+    if not cm.has_server_access(user.id, server_name):
+        raise HTTPException(status_code=403, detail="No access")
     store = get_routine_store()
     try:
         instance_id = await store.execute(
@@ -108,6 +127,9 @@ async def schedule_routine(
     user: WebUser = Depends(get_current_user),
 ):
     """Schedule a routine at an interval. Returns instance_id."""
+    cm = get_config_manager()
+    if not cm.has_server_access(user.id, server_name):
+        raise HTTPException(status_code=403, detail="No access")
     store = get_routine_store()
     try:
         instance_id = await store.schedule(
@@ -128,6 +150,9 @@ async def run_routine_v2(
     user: WebUser = Depends(get_current_user),
 ):
     """Execute a routine (supports names with slashes like agent/routine)."""
+    cm = get_config_manager()
+    if not cm.has_server_access(user.id, body.server_name):
+        raise HTTPException(status_code=403, detail="No access")
     store = get_routine_store()
     try:
         instance_id = await store.execute(
@@ -147,6 +172,9 @@ async def schedule_routine_v2(
     user: WebUser = Depends(get_current_user),
 ):
     """Schedule a routine (supports names with slashes like agent/routine)."""
+    cm = get_config_manager()
+    if not cm.has_server_access(user.id, body.server_name):
+        raise HTTPException(status_code=403, detail="No access")
     store = get_routine_store()
     try:
         instance_id = await store.schedule(
@@ -170,6 +198,23 @@ async def stop_instance(instance_id: str, user: WebUser = Depends(get_current_us
     return {"stopped": True}
 
 
+@router.get("/{routine_name:path}/hooks")
+async def get_hooks(routine_name: str, user: WebUser = Depends(get_current_user)):
+    """Get the post-execution hook config for a routine."""
+    cfg = routine_hooks.load_hooks(routine_name)
+    return cfg if cfg is not None else routine_hooks._default_config()
+
+
+@router.put("/{routine_name:path}/hooks")
+async def put_hooks(
+    routine_name: str,
+    body: HooksRequest,
+    user: WebUser = Depends(get_current_user),
+):
+    """Save the post-execution hook config for a routine."""
+    return routine_hooks.save_hooks(routine_name, body.model_dump())
+
+
 @router.get("/options/{source}")
 async def get_field_options(
     source: str,
@@ -179,7 +224,6 @@ async def get_field_options(
     """Return dynamic options for routine config fields (e.g. controller_configs)."""
     if source == "controller_configs":
         try:
-            from config_manager import get_config_manager
             cm = get_config_manager()
             client = await cm.get_client(server)
             if not client:
@@ -227,6 +271,29 @@ async def get_field_options(
             log.warning(f"Failed to fetch controller types: {e}")
             return {"options": []}
     return {"options": []}
+
+
+@router.get("/{routine_name:path}/source")
+async def get_routine_source(
+    routine_name: str,
+    user: WebUser = Depends(get_current_user),
+):
+    """Return the source code of a routine."""
+    store = get_routine_store()
+    all_routines = store._discover_all()
+    routine = all_routines.get(routine_name)
+    if not routine:
+        raise HTTPException(404, "Routine not found")
+    try:
+        source_file = inspect.getfile(routine.run_fn)
+        source_path = Path(source_file).resolve()
+        routines_dir = Path("routines").resolve()
+        if not str(source_path).startswith(str(routines_dir)):
+            raise HTTPException(403, "Source not available")
+        source = source_path.read_text()
+        return {"filename": source_path.name, "source": source}
+    except (TypeError, OSError) as e:
+        raise HTTPException(404, f"Source not available: {e}")
 
 
 @router.get("/{routine_name:path}/reports")

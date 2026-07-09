@@ -6,7 +6,7 @@ from dataclasses import dataclass, field
 
 from telegram import Bot
 
-from condor.acp import ACP_COMMANDS, ACPClient, PermissionCallback, PromptDone
+from condor.acp import ACPClient, PermissionCallback, PromptDone, resolve_acp
 from condor.acp.pydantic_ai_client import PydanticAIClient, is_pydantic_ai_model
 from handlers.agents._shared import (
     build_initial_context,
@@ -38,9 +38,11 @@ class AgentSession:
     agent_key: str  # "claude-code", "gemini", "codex", "copilot", "ollama:model", "lmstudio:model", etc.
     client: ACPClient | PydanticAIClient
     mode: str = "condor"  # "condor", "agent_builder"
+    server_name: str | None = None  # Which Condor server this session uses
     is_busy: bool = False
     pending_context: str | None = None  # Lazy context: injected on first prompt
     _lock: asyncio.Lock = field(default_factory=asyncio.Lock)
+    _abort_event: asyncio.Event = field(default_factory=asyncio.Event)
 
     async def prompt_stream(self, text: str):
         """Stream a prompt, managing the busy flag and lock.
@@ -55,6 +57,9 @@ class AgentSession:
             self.pending_context = None
             text = f"{ctx}\n\n---\n\nUser message:\n{text}"
 
+        # Clear abort flag for this new prompt
+        self._abort_event.clear()
+
         # Acquire lock with timeout -- prevents infinite wait when previous prompt is stuck
         try:
             await asyncio.wait_for(self._lock.acquire(), timeout=PROMPT_LOCK_TIMEOUT)
@@ -63,13 +68,19 @@ class AgentSession:
             # Force-clear busy flag if subprocess is dead (stuck state recovery)
             if not self.client.alive:
                 self.is_busy = False
-            raise RuntimeError("Agent is busy and not responding. Try /agent → New Session.")
+            raise RuntimeError(
+                "Agent is busy and not responding. Try /agent → New Session."
+            )
 
         self.is_busy = True
         try:
             loop = asyncio.get_event_loop()
             deadline = loop.time() + PROMPT_OVERALL_TIMEOUT
             async for event in self.client.prompt_stream(text):
+                # Check if abort was requested between events
+                if self._abort_event.is_set():
+                    yield PromptDone(stop_reason="cancelled")
+                    break
                 yield event
                 if isinstance(event, PromptDone):
                     break
@@ -85,6 +96,20 @@ class AgentSession:
             self.is_busy = False
             self._lock.release()
 
+    def abort(self) -> None:
+        """Abort the current in-flight prompt.
+
+        Sets the abort event so prompt_stream breaks out on the next iteration,
+        which triggers its finally block to properly release the lock.
+        Also cancels the ACP-level request future and drains the event queue
+        so the next prompt starts clean.
+        """
+        # Signal prompt_stream to stop iterating
+        self._abort_event.set()
+        if isinstance(self.client, ACPClient):
+            self.client.abort_prompt()
+        log.info("Session %s: prompt aborted", self.chat_id)
+
 
 async def get_or_create_session(
     chat_id: int | str,
@@ -95,6 +120,7 @@ async def get_or_create_session(
     mode: str = "condor",
     platform: str = "telegram",
     lazy_context: bool = False,
+    server_name: str | None = None,
 ) -> AgentSession:
     """Get existing session or create a new one.
 
@@ -115,12 +141,15 @@ async def get_or_create_session(
     effective_chat_id = chat_id if isinstance(chat_id, int) else (user_id or 0)
     extra_env = {
         "CONDOR_CHAT_ID": str(effective_chat_id),
+        "CONDOR_USER_ID": str(user_id or effective_chat_id),
     }
 
     # Build dynamic MCP servers from user's Condor permissions
     mcp_servers: list[dict] = []
     if user_id:
-        mcp_servers = build_mcp_servers_for_session(user_id, chat_id, user_data)
+        mcp_servers = build_mcp_servers_for_session(
+            user_id, chat_id, user_data, server_name=server_name
+        )
 
     # Check if agent_key requires PydanticAI client (ollama, lmstudio, openai, etc.)
     use_pydantic_ai = is_pydantic_ai_model(agent_key)
@@ -133,9 +162,13 @@ async def get_or_create_session(
         # Priority: user preference > env variable > auto-detect (None)
         agent_prefs = get_agent_prefs(user_data) if user_data else {}
         tool_filter_mode = (
-            agent_prefs.get("tool_filter_mode") or
-            os.environ.get("PYDANTIC_AI_TOOL_FILTER") or
-            None  # None triggers auto-detection based on model size
+            agent_prefs.get("tool_filter_mode")
+            or os.environ.get("PYDANTIC_AI_TOOL_FILTER")
+            or None  # None triggers auto-detection based on model size
+        )
+
+        base_url = (
+            agent_prefs.get("base_url") or os.environ.get("LMSTUDIO_BASE_URL") or None
         )
 
         client = PydanticAIClient(
@@ -144,16 +177,21 @@ async def get_or_create_session(
             permission_callback=permission_callback,
             extra_env=extra_env,
             tool_filter_mode=tool_filter_mode,  # Auto-detects if None
+            base_url=base_url,
         )
     else:
-        # For ACP subprocess models: claude-code, gemini, codex
-        command = ACP_COMMANDS.get(agent_key, ACP_COMMANDS["claude-code"])
+        # For ACP subprocess models: claude-code, gemini, codex.
+        # A Claude model can be pinned via a suffix, e.g. "claude-acp:opus" /
+        # "claude-acp:sonnet"; ACPClient selects it via session/set_model after
+        # handshake (the bridge ignores ANTHROPIC_MODEL). Bare key = agent default.
+        command, model_env, model_pref = resolve_acp(agent_key)
         client = ACPClient(
             command=command,
             working_dir=get_project_dir(),
             mcp_servers=mcp_servers,
             permission_callback=permission_callback,
-            extra_env=extra_env,
+            extra_env={**extra_env, **model_env},
+            model=model_pref,
         )
 
     await client.start()
@@ -162,7 +200,24 @@ async def get_or_create_session(
         # Build initial context about server and permissions
         initial_context = ""
         if user_id:
-            initial_context = build_initial_context(user_id, chat_id, user_data, agent_key=agent_key, platform=platform)
+            initial_context = build_initial_context(
+                user_id,
+                chat_id,
+                user_data,
+                agent_key=agent_key,
+                platform=platform,
+                server_name=server_name,
+            )
+        # Resolve the server name that was actually used for this session
+        resolved_server = server_name
+        if not resolved_server and user_id:
+            from config_manager import get_config_manager, get_effective_server
+
+            resolved_server = get_effective_server(chat_id, user_data)
+            if not resolved_server:
+                cm = get_config_manager()
+                accessible = cm.get_accessible_servers(user_id)
+                resolved_server = accessible[0] if accessible else None
 
         if initial_context and not lazy_context:
             # Eager: send context now (blocks until agent processes it)
@@ -177,6 +232,7 @@ async def get_or_create_session(
             agent_key=agent_key,
             client=client,
             mode=mode,
+            server_name=resolved_server,
             pending_context=initial_context or None,
         )
     except Exception:
@@ -262,7 +318,9 @@ async def _health_check_loop() -> None:
                     dead_chats.append(chat_id)
 
             for chat_id in dead_chats:
-                log.warning("Health monitor: dead session for chat %s, cleaning up", chat_id)
+                log.warning(
+                    "Health monitor: dead session for chat %s, cleaning up", chat_id
+                )
                 await _destroy_session_internal(chat_id)
                 # Only send Telegram notifications for integer chat_ids (not web sessions)
                 if _health_bot and isinstance(chat_id, int):
@@ -272,6 +330,8 @@ async def _health_check_loop() -> None:
                             text="Agent session ended unexpectedly. Send a message to start a new session.",
                         )
                     except Exception:
-                        log.warning("Failed to notify chat %s about dead session", chat_id)
+                        log.warning(
+                            "Failed to notify chat %s about dead session", chat_id
+                        )
     except asyncio.CancelledError:
         pass

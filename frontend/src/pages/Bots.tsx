@@ -1,9 +1,14 @@
-import { Archive, Bot, FlaskConical, Loader2, TerminalSquare } from "lucide-react";
+import { Archive, Bot, FlaskConical, History, TerminalSquare } from "lucide-react";
 import { lazy, Suspense, useRef } from "react";
 import { useSearchParams } from "react-router-dom";
 
+import { FallbackSpinner } from "@/components/ui/FallbackSpinner";
+
 const ActiveBotsTab = lazy(() =>
   import("@/pages/tabs/ActiveBotsTab").then((m) => ({ default: m.ActiveBotsTab })),
+);
+const BotRunsTab = lazy(() =>
+  import("@/pages/tabs/BotRunsTab").then((m) => ({ default: m.BotRunsTab })),
 );
 const ArchivedBotsTab = lazy(() =>
   import("@/pages/tabs/ArchivedBotsTab").then((m) => ({ default: m.ArchivedBotsTab })),
@@ -17,20 +22,13 @@ const EditorTab = lazy(() =>
 
 const TABS = [
   { key: "active", label: "Active", icon: Bot },
+  { key: "runs", label: "Runs", icon: History },
   { key: "editor", label: "Editor", icon: TerminalSquare },
   { key: "backtest", label: "Backtest", icon: FlaskConical },
   { key: "archived", label: "Archived", icon: Archive },
 ] as const;
 
 type TabKey = (typeof TABS)[number]["key"];
-
-function FallbackSpinner() {
-  return (
-    <div className="flex items-center justify-center py-20">
-      <Loader2 className="h-6 w-6 animate-spin text-[var(--color-text-muted)]" />
-    </div>
-  );
-}
 
 export function Bots() {
   const [searchParams, setSearchParams] = useSearchParams();
@@ -71,6 +69,11 @@ export function Bots() {
         {visitedRef.current.has("active") && (
           <div style={{ display: currentTab === "active" ? undefined : "none" }}>
             <ActiveBotsTab />
+          </div>
+        )}
+        {visitedRef.current.has("runs") && (
+          <div style={{ display: currentTab === "runs" ? undefined : "none" }}>
+            <BotRunsTab />
           </div>
         )}
         {visitedRef.current.has("archived") && (

@@ -11,7 +11,23 @@ logger = logging.getLogger(__name__)
 
 # Simple TTL cache for candle data
 _candle_cache: dict[tuple, tuple[float, list]] = {}  # key -> (timestamp, data)
-_CANDLE_CACHE_TTL = 5.0  # seconds
+_CANDLE_CACHE_TTL = 30.0  # seconds
+_CANDLE_CACHE_MAX = 50  # hard cap on entries (keys rotate every minute per chart)
+
+
+def _candle_cache_put(key: tuple, value: list, now: float) -> None:
+    """Insert into the candle cache, evicting expired entries and capping size."""
+    expired = [
+        k for k, (ts, _) in _candle_cache.items() if now - ts >= _CANDLE_CACHE_TTL
+    ]
+    for k in expired:
+        _candle_cache.pop(k, None)
+    _candle_cache[key] = (now, value)
+    while len(_candle_cache) > _CANDLE_CACHE_MAX:
+        # dicts preserve insertion order: drop the oldest entry first
+        _candle_cache.pop(next(iter(_candle_cache)))
+
+
 from condor.web.auth import get_current_user
 from condor.web.models import (
     CandleData,
@@ -35,7 +51,9 @@ async def get_connectors(name: str, user: WebUser = Depends(get_current_user)):
     from condor.server_data_service import ServerDataType, get_server_data_service
 
     try:
-        result = await get_server_data_service().get_or_fetch(name, ServerDataType.CANDLE_CONNECTORS)
+        result = await get_server_data_service().get_or_fetch(
+            name, ServerDataType.CANDLE_CONNECTORS
+        )
     except Exception as e:
         raise HTTPException(status_code=502, detail=str(e))
     return result
@@ -51,7 +69,9 @@ async def get_connected_exchanges(name: str, user: WebUser = Depends(get_current
     from condor.server_data_service import ServerDataType, get_server_data_service
 
     try:
-        result = await get_server_data_service().get_or_fetch(name, ServerDataType.CONNECTORS)
+        result = await get_server_data_service().get_or_fetch(
+            name, ServerDataType.CONNECTORS
+        )
     except Exception as e:
         raise HTTPException(status_code=502, detail=str(e))
     return result or []
@@ -72,7 +92,10 @@ async def get_price(
 
     try:
         result = await get_server_data_service().get_or_fetch(
-            name, ServerDataType.PRICES, connector_name=connector, trading_pair=trading_pair
+            name,
+            ServerDataType.PRICES,
+            connector_name=connector,
+            trading_pair=trading_pair,
         )
     except Exception as e:
         raise HTTPException(status_code=502, detail=str(e))
@@ -81,7 +104,9 @@ async def get_price(
         raise HTTPException(status_code=502, detail="Failed to fetch price")
 
     if isinstance(result, (int, float)):
-        return MarketPriceResponse(connector=connector, trading_pair=trading_pair, mid_price=float(result))
+        return MarketPriceResponse(
+            connector=connector, trading_pair=trading_pair, mid_price=float(result)
+        )
     elif isinstance(result, dict):
         return MarketPriceResponse(
             connector=connector,
@@ -91,6 +116,29 @@ async def get_price(
             best_ask=float(result.get("best_ask", 0)),
         )
     raise HTTPException(status_code=502, detail="Unexpected response format")
+
+
+@router.post("/servers/{name}/rate-oracle/rates")
+async def get_rate_oracle_rates(
+    name: str,
+    body: dict,
+    user: WebUser = Depends(get_current_user),
+):
+    cm = get_config_manager()
+    if not cm.has_server_access(user.id, name):
+        raise HTTPException(status_code=403, detail="No access")
+
+    trading_pairs = body.get("trading_pairs", [])
+    if not trading_pairs:
+        return {"rates": {}}
+
+    client = await cm.get_client(name)
+    try:
+        result = await client.rate_oracle.get_rates(trading_pairs=trading_pairs)
+    except Exception as e:
+        raise HTTPException(status_code=502, detail=str(e))
+
+    return result
 
 
 @router.get("/servers/{name}/market/trading-rules", response_model=TradingRulesResponse)
@@ -124,7 +172,9 @@ async def get_trading_rules(
                     min_order_size=float(rule_data.get("min_order_size", 0)),
                     min_notional_size=float(rule_data.get("min_notional_size", 0)),
                     min_price_increment=float(rule_data.get("min_price_increment", 0)),
-                    min_base_amount_increment=float(rule_data.get("min_base_amount_increment", 0)),
+                    min_base_amount_increment=float(
+                        rule_data.get("min_base_amount_increment", 0)
+                    ),
                 )
             )
     return TradingRulesResponse(connector=connector, rules=rules)
@@ -155,16 +205,32 @@ async def get_order_book(
     if isinstance(result, dict):
         for entry in (result.get("bids") or [])[:depth]:
             if isinstance(entry, (list, tuple)) and len(entry) >= 2:
-                bids.append(OrderBookLevel(price=float(entry[0]), amount=float(entry[1])))
+                bids.append(
+                    OrderBookLevel(price=float(entry[0]), amount=float(entry[1]))
+                )
             elif isinstance(entry, dict):
-                bids.append(OrderBookLevel(price=float(entry.get("price", 0)), amount=float(entry.get("amount", entry.get("quantity", 0)))))
+                bids.append(
+                    OrderBookLevel(
+                        price=float(entry.get("price", 0)),
+                        amount=float(entry.get("amount", entry.get("quantity", 0))),
+                    )
+                )
         for entry in (result.get("asks") or [])[:depth]:
             if isinstance(entry, (list, tuple)) and len(entry) >= 2:
-                asks.append(OrderBookLevel(price=float(entry[0]), amount=float(entry[1])))
+                asks.append(
+                    OrderBookLevel(price=float(entry[0]), amount=float(entry[1]))
+                )
             elif isinstance(entry, dict):
-                asks.append(OrderBookLevel(price=float(entry.get("price", 0)), amount=float(entry.get("amount", entry.get("quantity", 0)))))
+                asks.append(
+                    OrderBookLevel(
+                        price=float(entry.get("price", 0)),
+                        amount=float(entry.get("amount", entry.get("quantity", 0))),
+                    )
+                )
 
-    return OrderBookResponse(connector=connector, trading_pair=trading_pair, bids=bids, asks=asks)
+    return OrderBookResponse(
+        connector=connector, trading_pair=trading_pair, bids=bids, asks=asks
+    )
 
 
 @router.get("/servers/{name}/market/candles", response_model=list[CandleData])
@@ -182,7 +248,18 @@ async def get_candles(
     if not cm.has_server_access(user.id, name):
         raise HTTPException(status_code=403, detail="No access")
 
-    cache_key = (name, connector, trading_pair, interval, limit, start_time, end_time)
+    # Bucket start_time to 60s intervals so near-identical requests share cache
+    bucketed_start = int(start_time // 60) * 60 if start_time is not None else None
+    bucketed_end = int(end_time // 60) * 60 if end_time is not None else None
+    cache_key = (
+        name,
+        connector,
+        trading_pair,
+        interval,
+        limit,
+        bucketed_start,
+        bucketed_end,
+    )
     now = time.monotonic()
     cached = _candle_cache.get(cache_key)
     if cached and (now - cached[0]) < _CANDLE_CACHE_TTL:
@@ -197,27 +274,56 @@ async def get_candles(
             et = int(end_time) if end_time else int(time.time())
             logger.info(
                 "Fetching historical candles: connector=%s pair=%s interval=%s start=%s end=%s",
-                connector, trading_pair, interval, st, et,
+                connector,
+                trading_pair,
+                interval,
+                st,
+                et,
             )
             result = await client.market_data.get_historical_candles(
-                connector, trading_pair, interval,
-                start_time=st, end_time=et,
+                connector,
+                trading_pair,
+                interval,
+                start_time=st,
+                end_time=et,
             )
-            logger.info("Historical candles result: type=%s len=%s", type(result).__name__, len(result) if isinstance(result, (list, dict)) else "?")
+            logger.info(
+                "Historical candles result: type=%s len=%s",
+                type(result).__name__,
+                len(result) if isinstance(result, (list, dict)) else "?",
+            )
     except Exception as e:
-        logger.warning("get_historical_candles failed: %s — falling back to get_candles", e)
+        logger.warning(
+            "get_historical_candles failed: %s — falling back to get_candles", e
+        )
         result = None
 
     # Fallback: if historical returned nothing usable, use regular candles
-    candles_raw = result if isinstance(result, list) else result.get("data", []) if isinstance(result, dict) else []
+    candles_raw = (
+        result
+        if isinstance(result, list)
+        else result.get("data", []) if isinstance(result, dict) else []
+    )
     if not candles_raw:
         try:
-            logger.info("Falling back to get_candles: connector=%s pair=%s interval=%s limit=%s", connector, trading_pair, interval, limit)
-            result = await client.market_data.get_candles(connector, trading_pair, interval, limit)
+            logger.info(
+                "Falling back to get_candles: connector=%s pair=%s interval=%s limit=%s",
+                connector,
+                trading_pair,
+                interval,
+                limit,
+            )
+            result = await client.market_data.get_candles(
+                connector, trading_pair, interval, limit
+            )
         except Exception as e:
             raise HTTPException(status_code=502, detail=str(e))
 
-    candles_raw = result if isinstance(result, list) else result.get("data", []) if isinstance(result, dict) else []
+    candles_raw = (
+        result
+        if isinstance(result, list)
+        else result.get("data", []) if isinstance(result, dict) else []
+    )
 
     candles = []
     for c in candles_raw:
@@ -243,5 +349,5 @@ async def get_candles(
                     volume=float(c[5]),
                 )
             )
-    _candle_cache[cache_key] = (now, candles)
+    _candle_cache_put(cache_key, candles, now)
     return candles

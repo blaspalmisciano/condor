@@ -1,29 +1,34 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import {
+  Bell,
   Brain,
   ChevronDown,
   ChevronLeft,
   ChevronRight,
   ChevronUp,
   Clock,
+  Download,
   Loader2,
-  MessageSquare,
   Moon,
   Play,
   PlayCircle,
   Settings2,
-  Square,
   Sun,
   Trash2,
   X,
   Zap,
+  AlertTriangle,
+  Code,
 } from "lucide-react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
+import { AgentToggleButton } from "@/components/layout/AgentToggleButton";
 import { type RoutineInstance, api } from "@/lib/api";
+import { buildConfigValues, formatAgo, formatInterval, invalidateRoutineQueries, saveConfig } from "@/lib/routineUtils";
 import { setViewContext } from "@/lib/viewContext";
 import { useServer } from "@/hooks/useServer";
 import { RoutineConfigForm } from "./RoutineConfigForm";
+import { RoutineHooksPanel } from "./RoutineHooksPanel";
 import { ScheduleDropdown } from "./ScheduleDropdown";
 
 interface ReportBrowserProps {
@@ -44,6 +49,8 @@ export function ReportBrowser({
   const [sourceTypeFilter, setSourceTypeFilter] = useState<string>(initialSourceTypeFilter || "all");
   const [isCompact, setIsCompact] = useState(false);
   const [showConfigPanel, setShowConfigPanel] = useState(false);
+  const [showNotifyPanel, setShowNotifyPanel] = useState(false);
+  const [showSourceModal, setShowSourceModal] = useState(false);
   const [reportTheme, setReportTheme] = useState<"dark" | "light">("dark");
   const sidebarRef = useRef<HTMLDivElement>(null);
   const iframeRef = useRef<HTMLIFrameElement>(null);
@@ -93,13 +100,24 @@ export function ReportBrowser({
   );
   const isAgent = activeRoutine?.source.startsWith("agent:") ?? false;
 
-  // Reports for active source
+  // Reports for active source — poll when a scheduled instance is active
+  const hasScheduledInstance = instances.some(
+    (i) => i.routine_name === activeSource && (i.status === "running" || i.status === "scheduled"),
+  );
   const { data: reportsData, isLoading: loadingReports } = useQuery({
     queryKey: ["routine-reports", activeSource],
     queryFn: () => api.getRoutineReports(activeSource),
     enabled: !!activeSource,
+    refetchInterval: hasScheduledInstance ? 10_000 : false,
   });
   const reports = reportsData?.reports ?? [];
+
+  // Source code query (lazy)
+  const { data: sourceData } = useQuery({
+    queryKey: ["routine-source", activeSource],
+    queryFn: () => api.getRoutineSource(activeSource),
+    enabled: showSourceModal && !!activeSource,
+  });
 
   const [selectedReportIdx, setSelectedReportIdx] = useState(0);
   const selectedReport = reports[selectedReportIdx] ?? null;
@@ -115,22 +133,20 @@ export function ReportBrowser({
     [instances, activeSource],
   );
 
-  // Config state: prefer last-used config from instances, then defaults from routine fields
+  // Latest failed instance for error display
+  const latestFailedInstance = useMemo(
+    () => instances.find((i) => i.routine_name === activeSource && i.status === "failed"),
+    [instances, activeSource],
+  );
+
+  // Config state: merge routine fields with saved localStorage values
   const [configValues, setConfigValues] = useState<Record<string, unknown>>({});
 
   useEffect(() => {
-    const lastInstance = instances.find((i) => i.routine_name === activeSource);
-    if (lastInstance && Object.keys(lastInstance.config || {}).length > 0) {
-      setConfigValues({ ...lastInstance.config });
-    } else if (activeRoutine) {
-      const defaults: Record<string, unknown> = {};
-      for (const [key, field] of Object.entries(activeRoutine.fields)) {
-        defaults[key] = field.default;
-      }
-      setConfigValues(defaults);
-    }
+    if (!activeRoutine) return;
+    setConfigValues(buildConfigValues(activeRoutine));
     setShowConfigPanel(false);
-  }, [activeSource, activeRoutine, instances]);
+  }, [activeSource, activeRoutine]);
 
   // Track running instance to poll for completion
   const [pollingInstanceId, setPollingInstanceId] = useState<string | null>(null);
@@ -146,10 +162,7 @@ export function ReportBrowser({
   useEffect(() => {
     if (polledInstance && polledInstance.status !== "running") {
       setPollingInstanceId(null);
-      qc.invalidateQueries({ queryKey: ["routine-reports", activeSource] });
-      qc.invalidateQueries({ queryKey: ["reports-grouped"] });
-      qc.invalidateQueries({ queryKey: ["routines"] });
-      qc.invalidateQueries({ queryKey: ["routine-instances"] });
+      invalidateRoutineQueries(qc, activeSource);
     }
   }, [polledInstance, activeSource, qc]);
 
@@ -200,21 +213,16 @@ export function ReportBrowser({
     for (let i = 0; i < toRun.length; i++) {
       setRunAllProgress({ current: i + 1, total: toRun.length });
       const routine = toRun[i];
-      const defaults: Record<string, unknown> = {};
-      for (const [key, field] of Object.entries(routine.fields)) {
-        defaults[key] = field.default;
-      }
+      const cfg = buildConfigValues(routine);
       try {
-        await api.runRoutine(server, routine.name, defaults);
+        await api.runRoutine(server, routine.name, cfg);
       } catch {
         // continue with remaining routines
       }
     }
     setRunAllProgress(null);
+    invalidateRoutineQueries(qc);
     qc.invalidateQueries({ queryKey: ["routine-reports"] });
-    qc.invalidateQueries({ queryKey: ["reports-grouped"] });
-    qc.invalidateQueries({ queryKey: ["routines"] });
-    qc.invalidateQueries({ queryKey: ["routine-instances"] });
   }, [server, filteredRoutines, qc]);
 
   // Sync theme to iframe when it changes or report changes
@@ -222,7 +230,7 @@ export function ReportBrowser({
     const iframe = iframeRef.current;
     if (!iframe) return;
     const sendTheme = () => {
-      iframe.contentWindow?.postMessage({ type: "set-theme", theme: reportTheme }, "*");
+      iframe.contentWindow?.postMessage({ type: "set-theme", theme: reportTheme }, window.location.origin);
     };
     iframe.addEventListener("load", sendTheme);
     sendTheme();
@@ -262,14 +270,16 @@ export function ReportBrowser({
       else if (e.key === "ArrowLeft") { goPrevReport(); e.preventDefault(); }
       else if (e.key === "ArrowRight") { goNextReport(); e.preventDefault(); }
       else if (e.key === "Escape") {
-        if (showConfigPanel) setShowConfigPanel(false);
+        if (showSourceModal) setShowSourceModal(false);
+        else if (showConfigPanel) setShowConfigPanel(false);
+        else if (showNotifyPanel) setShowNotifyPanel(false);
         else onClose();
         e.preventDefault();
       }
     };
     window.addEventListener("keydown", handler);
     return () => window.removeEventListener("keydown", handler);
-  }, [goSourceUp, goSourceDown, goPrevReport, goNextReport, onClose, showConfigPanel]);
+  }, [goSourceUp, goSourceDown, goPrevReport, goNextReport, onClose, showConfigPanel, showNotifyPanel, showSourceModal]);
 
   // Scroll active source into view
   useEffect(() => {
@@ -493,7 +503,7 @@ export function ReportBrowser({
                     <span className="text-emerald-400 capitalize">{inst.status}</span>
                     {inst.schedule?.type === "interval" && (
                       <span className="text-[var(--color-text-muted)]">
-                        <Clock className="inline h-2.5 w-2.5" /> {inst.schedule.interval_sec as number}s
+                        <Clock className="inline h-2.5 w-2.5" /> {formatInterval(inst.schedule.interval_sec as number)}
                       </span>
                     )}
                     <span className="text-[var(--color-text-muted)]">{inst.run_count} runs</span>
@@ -503,7 +513,7 @@ export function ReportBrowser({
                       className="ml-0.5 rounded p-0.5 text-[var(--color-red)] hover:bg-[var(--color-red)]/10"
                       title="Stop"
                     >
-                      <Square className="h-2.5 w-2.5" />
+                      <Trash2 className="h-2.5 w-2.5" />
                     </button>
                   </div>
                 ))}
@@ -515,15 +525,42 @@ export function ReportBrowser({
             {activeRoutine && server && (
               <div className="flex items-center gap-1 mr-2">
                 <button
-                  onClick={() => setShowConfigPanel(!showConfigPanel)}
-                  className={`rounded p-1.5 transition-colors ${
+                  onClick={() => setShowSourceModal(true)}
+                  className="flex items-center gap-1 rounded px-2 py-1 text-[10px] font-semibold text-[var(--color-text-muted)] transition-colors hover:bg-[var(--color-surface-hover)] hover:text-[var(--color-text)]"
+                  title="View source code"
+                >
+                  <Code className="h-3.5 w-3.5" />
+                  Source
+                </button>
+                <button
+                  onClick={() => {
+                    setShowConfigPanel((v) => !v);
+                    setShowNotifyPanel(false);
+                  }}
+                  className={`flex items-center gap-1 rounded px-2 py-1 text-[10px] font-semibold transition-colors ${
                     showConfigPanel
                       ? "bg-[var(--color-primary)]/10 text-[var(--color-primary)]"
                       : "text-[var(--color-text-muted)] hover:bg-[var(--color-surface-hover)] hover:text-[var(--color-text)]"
                   }`}
                   title="Configure & Run"
                 >
-                  <Settings2 className="h-4 w-4" />
+                  <Settings2 className="h-3.5 w-3.5" />
+                  Config
+                </button>
+                <button
+                  onClick={() => {
+                    setShowNotifyPanel((v) => !v);
+                    setShowConfigPanel(false);
+                  }}
+                  className={`flex items-center gap-1 rounded px-2 py-1 text-[10px] font-semibold transition-colors ${
+                    showNotifyPanel
+                      ? "bg-[var(--color-primary)]/10 text-[var(--color-primary)]"
+                      : "text-[var(--color-text-muted)] hover:bg-[var(--color-surface-hover)] hover:text-[var(--color-text)]"
+                  }`}
+                  title="Post-run notifications"
+                >
+                  <Bell className="h-3.5 w-3.5" />
+                  Notify
                 </button>
                 <button
                   onClick={() => runMutation.mutate()}
@@ -590,6 +627,17 @@ export function ReportBrowser({
                 </button>
               </>
             )}
+            {/* Download */}
+            {selectedReport && (
+              <a
+                href={`/reports/${selectedReport.filename}`}
+                download={selectedReport.filename}
+                className="rounded p-1.5 text-[var(--color-text-muted)] hover:bg-[var(--color-surface-hover)] hover:text-[var(--color-text)]"
+                title="Download report"
+              >
+                <Download className="h-4 w-4" />
+              </a>
+            )}
             {/* Delete */}
             {selectedReport && (
               confirmDelete ? (
@@ -627,16 +675,7 @@ export function ReportBrowser({
               {reportTheme === "dark" ? <Sun className="h-4 w-4" /> : <Moon className="h-4 w-4" />}
             </button>
             {/* Agent chat toggle */}
-            <button
-              onClick={() => {
-                window.dispatchEvent(new KeyboardEvent("keydown", { key: "k", metaKey: true, bubbles: true }));
-              }}
-              className="ml-1 flex items-center gap-1 rounded-md px-2 py-1 text-xs font-medium bg-amber-500/15 text-amber-500 hover:bg-amber-500/25 border border-amber-500/30 transition-all"
-              title="Agent (⌘K)"
-            >
-              <MessageSquare className="h-3.5 w-3.5" />
-              <span>Agent</span>
-            </button>
+            <AgentToggleButton className="ml-1" />
             {/* Close */}
             <button
               onClick={onClose}
@@ -647,19 +686,6 @@ export function ReportBrowser({
             </button>
           </div>
         </div>
-
-        {/* Report meta bar */}
-        {selectedReport && (
-          <div className="flex items-center gap-3 border-b border-[var(--color-border)]/50 px-4 py-1.5 text-[10px] text-[var(--color-text-muted)]">
-            <span>{selectedReport.title}</span>
-            <span>{new Date(selectedReport.created_at).toLocaleString()}</span>
-            {selectedReport.tags.map((tag) => (
-              <span key={tag} className="rounded bg-[var(--color-surface-hover)] px-1.5 py-0.5 text-[9px]">
-                #{tag}
-              </span>
-            ))}
-          </div>
-        )}
 
         {/* Config panel (collapsible) */}
         {showConfigPanel && activeRoutine && (
@@ -679,7 +705,13 @@ export function ReportBrowser({
               <RoutineConfigForm
                 fields={activeRoutine.fields}
                 values={configValues}
-                onChange={(key, value) => setConfigValues((prev) => ({ ...prev, [key]: value }))}
+                onChange={(key, value) => {
+                  setConfigValues((prev) => {
+                    const next = { ...prev, [key]: value };
+                    saveConfig(activeSource, next);
+                    return next;
+                  });
+                }}
               />
             ) : (
               <p className="text-xs text-[var(--color-text-muted)]">No configurable fields</p>
@@ -692,10 +724,28 @@ export function ReportBrowser({
           </div>
         )}
 
+        {/* Notifications panel (collapsible) */}
+        {showNotifyPanel && activeRoutine && (
+          <div className="border-b border-[var(--color-border)] bg-[var(--color-surface)] px-4 py-3">
+            <div className="flex items-center justify-between mb-2">
+              <h3 className="text-[11px] font-bold uppercase tracking-wider text-[var(--color-text-muted)]">
+                Notifications
+              </h3>
+              <button
+                onClick={() => setShowNotifyPanel(false)}
+                className="rounded p-1 text-[var(--color-text-muted)] hover:bg-[var(--color-surface-hover)]"
+              >
+                <X className="h-3 w-3" />
+              </button>
+            </div>
+            <RoutineHooksPanel routineName={activeSource} collapsible={false} />
+          </div>
+        )}
+
         {/* Report timeline strip at top */}
         {reports.length > 1 && (
-          <div className="flex items-center gap-1 border-b border-[var(--color-border)]/50 px-4 py-1.5 overflow-x-auto scrollbar-thin">
-            {reports.slice(0, 20).map((r, idx) => (
+          <div className="flex items-center gap-1 border-b border-[var(--color-border)]/50 px-4 py-1.5">
+            {reports.slice(0, 10).map((r, idx) => (
               <button
                 key={r.id}
                 onClick={() => setSelectedReportIdx(idx)}
@@ -709,10 +759,37 @@ export function ReportBrowser({
                 {formatAgo(r.created_at)}
               </button>
             ))}
-            {reports.length > 20 && (
-              <span className="shrink-0 text-[9px] text-[var(--color-text-muted)]/50 px-1">
-                +{reports.length - 20} more
-              </span>
+            {reports.length > 10 && (
+              <div className="relative shrink-0 ml-auto">
+                <select
+                  value={selectedReportIdx >= 10 ? selectedReportIdx : ""}
+                  onChange={(e) => {
+                    const val = e.target.value;
+                    if (val !== "") setSelectedReportIdx(Number(val));
+                  }}
+                  className={`appearance-none rounded-md pl-2.5 pr-7 py-1 text-[10px] font-medium cursor-pointer transition-colors focus:outline-none focus:ring-1 focus:ring-[var(--color-primary)]/40 ${
+                    selectedReportIdx >= 10
+                      ? "bg-[var(--color-primary)]/10 text-[var(--color-primary)] border border-[var(--color-primary)]/30"
+                      : "bg-[var(--color-surface-hover)] text-[var(--color-text-muted)] border border-[var(--color-border)] hover:text-[var(--color-text)] hover:border-[var(--color-text-muted)]/30"
+                  }`}
+                >
+                  <option value="" disabled>
+                    +{reports.length - 10} older reports
+                  </option>
+                  {reports.slice(10).map((r, i) => (
+                    <option key={r.id} value={i + 10}>
+                      {new Date(r.created_at).toLocaleString(undefined, {
+                        month: "short",
+                        day: "numeric",
+                        hour: "2-digit",
+                        minute: "2-digit",
+                      })}
+                      {r.title !== reports[0]?.title ? ` — ${r.title}` : ""}
+                    </option>
+                  ))}
+                </select>
+                <ChevronDown className="pointer-events-none absolute right-1.5 top-1/2 h-3 w-3 -translate-y-1/2 text-[var(--color-text-muted)]" />
+              </div>
             )}
           </div>
         )}
@@ -724,33 +801,81 @@ export function ReportBrowser({
               <Loader2 className="h-6 w-6 animate-spin text-[var(--color-text-muted)]" />
             </div>
           ) : !selectedReport ? (
-            // No reports — prompt to run for the first time
+            // No reports — show error if failed, otherwise prompt to run
             <div className="flex h-full flex-col items-center justify-center text-center px-8">
-              <Zap className="mb-3 h-10 w-10 text-[var(--color-text-muted)]/20" />
-              <p className="text-sm font-medium text-[var(--color-text)]">
-                No reports yet
-              </p>
-              <p className="mt-1 text-xs text-[var(--color-text-muted)]">
-                {activeRoutine?.description ?? "Run this routine to generate your first report."}
-              </p>
-              {activeRoutine && server && (
-                <button
-                  onClick={() => runMutation.mutate()}
-                  disabled={runMutation.isPending}
-                  className="mt-4 flex items-center gap-1.5 rounded-lg bg-[var(--color-primary)] px-5 py-2.5 text-sm font-semibold text-white transition-colors hover:bg-[var(--color-primary)]/80 disabled:opacity-50"
-                >
-                  {runMutation.isPending ? (
-                    <Loader2 className="h-4 w-4 animate-spin" />
-                  ) : (
-                    <Play className="h-4 w-4" />
+              {(polledInstance?.status === "failed" || latestFailedInstance) ? (
+                <>
+                  <div className="w-full max-w-lg rounded-lg border border-[var(--color-red)]/30 bg-[var(--color-red)]/5 p-5">
+                    <div className="flex items-center gap-2 mb-3">
+                      <AlertTriangle className="h-5 w-5 text-[var(--color-red)]" />
+                      <span className="text-sm font-semibold text-[var(--color-red)]">Routine Failed</span>
+                    </div>
+                    <pre className="whitespace-pre-wrap break-words text-left font-mono text-xs text-[var(--color-text-muted)] bg-[var(--color-surface)] rounded p-3 max-h-60 overflow-y-auto">
+                      {(polledInstance?.status === "failed" ? polledInstance.error : latestFailedInstance?.error) || "Unknown error"}
+                    </pre>
+                    {activeRoutine && server && (
+                      <button
+                        onClick={() => runMutation.mutate()}
+                        disabled={runMutation.isPending}
+                        className="mt-4 flex items-center gap-1.5 rounded-lg bg-[var(--color-primary)] px-4 py-2 text-xs font-semibold text-white transition-colors hover:bg-[var(--color-primary)]/80 disabled:opacity-50"
+                      >
+                        {runMutation.isPending ? (
+                          <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                        ) : (
+                          <Play className="h-3.5 w-3.5" />
+                        )}
+                        Retry
+                      </button>
+                    )}
+                  </div>
+                </>
+              ) : (
+                <>
+                  <Zap className="mb-3 h-10 w-10 text-[var(--color-text-muted)]/20" />
+                  <p className="text-sm font-medium text-[var(--color-text)]">
+                    No reports yet
+                  </p>
+                  <p className="mt-1 text-xs text-[var(--color-text-muted)]">
+                    {activeRoutine?.description ?? "Run this routine to generate your first report."}
+                  </p>
+                  {activeRoutine && Object.keys(activeRoutine.fields).length > 0 && (
+                    <div className="mt-4 w-full max-w-md rounded-lg border border-[var(--color-border)] bg-[var(--color-surface)] p-4">
+                      <h3 className="mb-2 text-[11px] font-bold uppercase tracking-wider text-[var(--color-text-muted)]">
+                        Configuration
+                      </h3>
+                      <RoutineConfigForm
+                        fields={activeRoutine.fields}
+                        values={configValues}
+                        onChange={(key, value) => {
+                          setConfigValues((prev) => {
+                            const next = { ...prev, [key]: value };
+                            saveConfig(activeSource, next);
+                            return next;
+                          });
+                        }}
+                      />
+                    </div>
                   )}
-                  Run for the first time
-                </button>
-              )}
-              {runMutation.isError && (
-                <p className="mt-2 text-xs text-[var(--color-red)]">
-                  {(runMutation.error as Error).message}
-                </p>
+                  {activeRoutine && server && (
+                    <button
+                      onClick={() => runMutation.mutate()}
+                      disabled={runMutation.isPending}
+                      className="mt-4 flex items-center gap-1.5 rounded-lg bg-[var(--color-primary)] px-5 py-2.5 text-sm font-semibold text-white transition-colors hover:bg-[var(--color-primary)]/80 disabled:opacity-50"
+                    >
+                      {runMutation.isPending ? (
+                        <Loader2 className="h-4 w-4 animate-spin" />
+                      ) : (
+                        <Play className="h-4 w-4" />
+                      )}
+                      Run for the first time
+                    </button>
+                  )}
+                  {runMutation.isError && (
+                    <p className="mt-2 text-xs text-[var(--color-red)]">
+                      {(runMutation.error as Error).message}
+                    </p>
+                  )}
+                </>
               )}
             </div>
           ) : (
@@ -759,6 +884,7 @@ export function ReportBrowser({
               src={`/reports/${selectedReport.filename}`}
               className="h-full w-full border-0"
               title={selectedReport.title}
+              sandbox="allow-scripts allow-popups"
             />
           )}
 
@@ -767,6 +893,8 @@ export function ReportBrowser({
             <button
               onClick={goPrevReport}
               className="absolute left-3 top-1/2 -translate-y-1/2 rounded-full bg-black/40 p-2 text-white/60 hover:bg-black/60 hover:text-white transition-all"
+              title="Previous report"
+              aria-label="Previous report"
             >
               <ChevronLeft className="h-5 w-5" />
             </button>
@@ -775,20 +903,53 @@ export function ReportBrowser({
             <button
               onClick={goNextReport}
               className="absolute right-3 top-1/2 -translate-y-1/2 rounded-full bg-black/40 p-2 text-white/60 hover:bg-black/60 hover:text-white transition-all"
+              title="Next report"
+              aria-label="Next report"
             >
               <ChevronRight className="h-5 w-5" />
             </button>
           )}
         </div>
       </div>
+
+      {/* Source code modal */}
+      {showSourceModal && (
+        <div className="fixed inset-0 z-[60] flex flex-col bg-[var(--color-bg)]">
+          <div className="flex items-center justify-between border-b border-[var(--color-border)] px-4 py-2">
+            <div className="flex items-center gap-3 min-w-0">
+              <Code className="h-4 w-4 text-[var(--color-text-muted)]" />
+              <span className="text-sm font-semibold text-[var(--color-text)]">
+                {sourceData?.filename ?? activeSource}
+              </span>
+            </div>
+            <button
+              onClick={() => setShowSourceModal(false)}
+              className="rounded p-1.5 text-[var(--color-text-muted)] hover:bg-[var(--color-surface-hover)] hover:text-[var(--color-text)]"
+              title="Close (Esc)"
+            >
+              <X className="h-4 w-4" />
+            </button>
+          </div>
+          <div className="flex-1 overflow-auto bg-[var(--color-surface)]">
+            {sourceData ? (
+              <pre className="p-0 m-0 text-xs leading-relaxed">
+                {sourceData.source.split("\n").map((line, i) => (
+                  <div key={i} className="flex hover:bg-[var(--color-surface-hover)]">
+                    <span className="sticky left-0 w-12 shrink-0 select-none bg-[var(--color-surface)] pr-3 text-right font-mono text-[var(--color-text-muted)]/40 border-r border-[var(--color-border)]/30">
+                      {i + 1}
+                    </span>
+                    <code className="pl-4 font-mono text-[var(--color-text)] whitespace-pre">{line}</code>
+                  </div>
+                ))}
+              </pre>
+            ) : (
+              <div className="flex h-full items-center justify-center">
+                <Loader2 className="h-6 w-6 animate-spin text-[var(--color-text-muted)]" />
+              </div>
+            )}
+          </div>
+        </div>
+      )}
     </div>
   );
-}
-
-function formatAgo(iso: string): string {
-  const diff = (Date.now() - new Date(iso).getTime()) / 1000;
-  if (diff < 60) return `${Math.floor(diff)}s ago`;
-  if (diff < 3600) return `${Math.floor(diff / 60)}m ago`;
-  if (diff < 86400) return `${Math.floor(diff / 3600)}h ago`;
-  return `${Math.floor(diff / 86400)}d ago`;
 }

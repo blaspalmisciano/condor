@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useRef, useState, useCallback } from "react";
+import { createPortal } from "react-dom";
 import { useQuery } from "@tanstack/react-query";
 
 import { useCondorWebSocket } from "@/hooks/useWebSocket";
@@ -9,6 +10,8 @@ import {
   getOverlayTimeRange,
   type ExecutorOverlay,
 } from "@/lib/executor-overlays";
+import { escapeHtml, formatCompactUsd, tsToSeconds } from "@/lib/formatters";
+import { getThemeColors, pnlHexColor, sideColor } from "@/lib/theme-colors";
 
 export interface SnapshotBubble {
   tick: number;
@@ -28,24 +31,17 @@ interface ExecutorChartProps {
   onSnapshotClick?: (tick: number) => void;
 }
 
-function getChartColors() {
-  const style = getComputedStyle(document.documentElement);
-  return {
-    bg: style.getPropertyValue("--chart-bg").trim() || "#0f1525",
-    grid: style.getPropertyValue("--chart-grid").trim() || "#1c2541",
-    text: style.getPropertyValue("--chart-text").trim() || "#6b7994",
-    up: style.getPropertyValue("--chart-up").trim() || "#22c55e",
-    down: style.getPropertyValue("--chart-down").trim() || "#ef4444",
-  };
-}
-
 const isActive = (status: string) => {
   const s = status?.toLowerCase() ?? "";
   return s === "running" || s === "active_position" || s === "active";
 };
 
-function tsToSeconds(ts: number): number {
-  return ts > 1e12 ? Math.floor(ts / 1000) : ts;
+/** Vertical line definition for grid box edges drawn directly on the canvas */
+interface GridVerticalLine {
+  time: number;
+  topPrice: number;
+  bottomPrice: number;
+  color: string;
 }
 
 /** Parse snapshot timestamp string to unix seconds */
@@ -75,6 +71,7 @@ export function ExecutorChart({
   const chartRef = useRef<import("lightweight-charts").IChartApi | null>(null);
   const seriesRef = useRef<import("lightweight-charts").ISeriesApi<"Candlestick"> | null>(null);
   const segmentSeriesRef = useRef<import("lightweight-charts").ISeriesApi<"Line">[]>([]);
+  const gridVerticalLinesRef = useRef<GridVerticalLine[]>([]);
   const overlaysRef = useRef<ExecutorOverlay[]>([]);
   const initializedRef = useRef(false);
   const [chartReady, setChartReady] = useState(false);
@@ -110,7 +107,7 @@ export function ExecutorChart({
       if (cancelled || !containerRef.current) return;
       chartModuleRef.current = mod;
 
-      const colors = getChartColors();
+      const colors = getThemeColors();
       const chart = mod.createChart(containerRef.current, {
         autoSize: true,
         layout: {
@@ -215,17 +212,17 @@ export function ExecutorChart({
         const textColor = cs.getPropertyValue("--color-text").trim() || "#e2e8f0";
         const borderColor = cs.getPropertyValue("--color-border").trim() || "#1c2541";
 
-        const pnlClr = o.pnl >= 0 ? "#22c55e" : "#ef4444";
+        const pnlClr = pnlHexColor(o.pnl);
         const pnlSign = o.pnl >= 0 ? "+" : "";
         const pnlStr = Math.abs(o.pnl) >= 1000 ? `${pnlSign}$${(o.pnl / 1000).toFixed(1)}K` : `${pnlSign}$${o.pnl.toFixed(2)}`;
         const pctStr = o.pnlPct !== 0 ? `${o.pnlPct > 0 ? "+" : ""}${(o.pnlPct * 100).toFixed(2)}%` : "";
         const volStr = Math.abs(o.volume) >= 1000 ? `$${(o.volume / 1000).toFixed(1)}K` : `$${o.volume.toFixed(0)}`;
         const feesStr = o.fees ? `$${o.fees.toFixed(2)}` : "";
 
-        const sideClr = o.side === "buy" ? "#22c55e" : "#ef4444";
+        const sideClr = sideColor(o.side);
         const sideBg = o.side === "buy" ? "rgba(34,197,94,0.15)" : "rgba(239,68,68,0.15)";
         const statusBg = isActive(o.status) ? "rgba(34,197,94,0.15)" : "rgba(156,163,175,0.15)";
-        const statusClr = isActive(o.status) ? "#22c55e" : textMuted;
+        const statusClr = isActive(o.status) ? getThemeColors().green : textMuted;
 
         // Build config detail rows
         const cfg = o.config || {};
@@ -243,14 +240,8 @@ export function ExecutorChart({
           if (Math.abs(p) >= 1) return p.toFixed(4);
           return p.toPrecision(6);
         };
-        const fmtUsd = (v: number) => {
-          if (Math.abs(v) >= 1_000_000) return "$" + (v / 1_000_000).toFixed(2) + "M";
-          if (Math.abs(v) >= 10_000) return "$" + (v / 1_000).toFixed(1) + "K";
-          return "$" + v.toFixed(2);
-        };
-
         const addRow = (label: string, value: string, color?: string) => {
-          detailRows += `<div style="display:flex;justify-content:space-between;gap:12px"><span style="color:${textMuted}">${label}</span><span style="font-family:monospace;${color ? `color:${color}` : `color:${textColor}`}">${value}</span></div>`;
+          detailRows += `<div style="display:flex;justify-content:space-between;gap:12px"><span style="color:${textMuted}">${escapeHtml(label)}</span><span style="font-family:monospace;${color ? `color:${color}` : `color:${textColor}`}">${escapeHtml(value)}</span></div>`;
         };
 
         if (o.type === "grid" && o.gridBox) {
@@ -265,23 +256,23 @@ export function ExecutorChart({
         }
 
         if (cfg.leverage != null && Number(cfg.leverage) > 1) addRow("Leverage", `${cfg.leverage}x`);
-        if (cfg.total_amount_quote != null) addRow("Amount", fmtUsd(Number(cfg.total_amount_quote)));
+        if (cfg.total_amount_quote != null) addRow("Amount", formatCompactUsd(Number(cfg.total_amount_quote)));
         else if (cfg.amount != null && Number(cfg.amount) > 0) addRow("Amount", String(cfg.amount));
 
         const tp = Number(tripleBarrier.take_profit || cfg.take_profit);
-        if (tp > 0 && tp !== -1) addRow("Take Profit", `${(tp * 100).toFixed(2)}%`, "#22c55e");
+        if (tp > 0 && tp !== -1) addRow("Take Profit", `${(tp * 100).toFixed(2)}%`, getThemeColors().green);
         const sl = Number(cfg.stop_loss);
-        if (sl > 0 && sl !== -1) addRow("Stop Loss", `${(sl * 100).toFixed(2)}%`, "#ef4444");
+        if (sl > 0 && sl !== -1) addRow("Stop Loss", `${(sl * 100).toFixed(2)}%`, getThemeColors().red);
 
         tooltip.innerHTML = `
           <div style="display:flex;align-items:center;gap:6px;margin-bottom:6px">
-            <span style="font-weight:700;font-size:12px;font-family:monospace;color:${textColor}">${o.executorId.slice(0, 10)}\u2026</span>
-            <span style="background:${sideBg};color:${sideClr};font-size:9px;font-weight:700;padding:1px 5px;border-radius:3px;text-transform:uppercase">${o.side}</span>
-            <span style="background:${statusBg};color:${statusClr};font-size:9px;font-weight:600;padding:1px 5px;border-radius:3px">${o.status}</span>
+            <span style="font-weight:700;font-size:12px;font-family:monospace;color:${textColor}">${escapeHtml(o.executorId.slice(0, 10))}\u2026</span>
+            <span style="background:${sideBg};color:${sideClr};font-size:9px;font-weight:700;padding:1px 5px;border-radius:3px;text-transform:uppercase">${escapeHtml(o.side)}</span>
+            <span style="background:${statusBg};color:${statusClr};font-size:9px;font-weight:600;padding:1px 5px;border-radius:3px">${escapeHtml(o.status)}</span>
           </div>
           <div style="display:flex;align-items:center;gap:4px;margin-bottom:2px">
-            <span style="background:${borderColor};padding:1px 5px;border-radius:3px;font-size:10px;border:1px solid ${borderColor};color:${textColor}">${o.type.toUpperCase()}</span>
-            ${o.closeType ? `<span style="font-size:10px;color:${textMuted}">${o.closeType}</span>` : ""}
+            <span style="background:${borderColor};padding:1px 5px;border-radius:3px;font-size:10px;border:1px solid ${borderColor};color:${textColor}">${escapeHtml(o.type.toUpperCase())}</span>
+            ${o.closeType ? `<span style="font-size:10px;color:${textMuted}">${escapeHtml(o.closeType)}</span>` : ""}
           </div>
           <div style="border-top:1px solid ${borderColor};margin:6px 0;padding-top:6px;display:grid;grid-template-columns:1fr 1fr;gap:4px 16px">
             <div><div style="color:${textMuted};font-size:9px;text-transform:uppercase;margin-bottom:1px">Net PnL</div><div style="font-weight:600;font-size:13px;color:${pnlClr};font-family:monospace">${pnlStr}</div></div>
@@ -293,21 +284,91 @@ export function ExecutorChart({
         `;
         tooltip.style.display = "block";
 
-        // Position tooltip on opposite side of cursor
+        // Position tooltip on opposite side of cursor (fixed/viewport coords)
         const containerRect = containerRef.current.getBoundingClientRect();
         const tooltipW = 280;
+        const tooltipH = tooltip.offsetHeight || 200;
         const cursorInRightHalf = param.point.x > containerRect.width / 2;
         let left = cursorInRightHalf
-          ? param.point.x - tooltipW - 16
-          : param.point.x + 16;
+          ? containerRect.left + param.point.x - tooltipW - 16
+          : containerRect.left + param.point.x + 16;
         if (left < 4) left = 4;
-        if (left + tooltipW > containerRect.width - 4) left = containerRect.width - tooltipW - 4;
-        let top = param.point.y - 10;
-        if (top < 0) top = 4;
+        if (left + tooltipW > window.innerWidth - 4) left = window.innerWidth - tooltipW - 4;
+        let top = containerRect.top + param.point.y - 10;
+        if (top + tooltipH > window.innerHeight - 4) {
+          top = window.innerHeight - tooltipH - 4;
+        }
+        if (top < 4) top = 4;
 
         tooltip.style.left = `${left}px`;
         tooltip.style.top = `${top}px`;
       });
+
+      // Draw vertical lines for grid boxes on a canvas overlay
+      const drawVerticalLines = () => {
+        const lines = gridVerticalLinesRef.current;
+        const chartEl = containerRef.current;
+        if (!chartEl) return;
+
+        // If no lines, clear the overlay canvas if it exists
+        if (!lines.length) {
+          const existing = chartEl.querySelector<HTMLCanvasElement>(".grid-vlines-canvas");
+          if (existing) {
+            const ctx2 = existing.getContext("2d");
+            if (ctx2) ctx2.clearRect(0, 0, existing.width, existing.height);
+          }
+          return;
+        }
+        // lightweight-charts renders into a canvas inside the container
+        const sourceCanvas = chartEl.querySelector("canvas");
+        if (!sourceCanvas) return;
+
+        // Get or create overlay canvas
+        let overlay = chartEl.querySelector<HTMLCanvasElement>(".grid-vlines-canvas");
+        if (!overlay) {
+          overlay = document.createElement("canvas");
+          overlay.className = "grid-vlines-canvas";
+          overlay.style.position = "absolute";
+          overlay.style.top = "0";
+          overlay.style.left = "0";
+          overlay.style.pointerEvents = "none";
+          overlay.style.zIndex = "3";
+          chartEl.style.position = "relative";
+          chartEl.appendChild(overlay);
+        }
+
+        const dpr = window.devicePixelRatio || 1;
+        const w = sourceCanvas.clientWidth;
+        const h = sourceCanvas.clientHeight;
+        overlay.width = w * dpr;
+        overlay.height = h * dpr;
+        overlay.style.width = `${w}px`;
+        overlay.style.height = `${h}px`;
+
+        const ctx = overlay.getContext("2d");
+        if (!ctx) return;
+        ctx.scale(dpr, dpr);
+        ctx.clearRect(0, 0, w, h);
+
+        const ts = chart.timeScale();
+        for (const line of lines) {
+          const x = ts.timeToCoordinate(line.time as import("lightweight-charts").UTCTimestamp);
+          if (x === null) continue;
+          const yTop = series.priceToCoordinate(line.topPrice);
+          const yBottom = series.priceToCoordinate(line.bottomPrice);
+          if (yTop === null || yBottom === null) continue;
+
+          ctx.beginPath();
+          ctx.strokeStyle = line.color;
+          ctx.lineWidth = 1;
+          ctx.moveTo(x, Math.min(yTop, yBottom));
+          ctx.lineTo(x, Math.max(yTop, yBottom));
+          ctx.stroke();
+        }
+      };
+
+      chart.timeScale().subscribeVisibleLogicalRangeChange(drawVerticalLines);
+      chart.subscribeCrosshairMove(drawVerticalLines);
 
       setChartReady(true);
     });
@@ -323,6 +384,28 @@ export function ExecutorChart({
       setChartReady(false);
     };
   }, []);
+
+  // ── Re-apply chart colors on theme change ──
+  useEffect(() => {
+    if (!chartRef.current || !chartModuleRef.current) return;
+    const chart = chartRef.current;
+    const mod = chartModuleRef.current;
+    const observer = new MutationObserver(() => {
+      const colors = getThemeColors();
+      chart.applyOptions({
+        layout: {
+          background: { type: mod.ColorType.Solid, color: colors.bg },
+          textColor: colors.text,
+        },
+        grid: {
+          vertLines: { color: colors.grid },
+          horzLines: { color: colors.grid },
+        },
+      });
+    });
+    observer.observe(document.documentElement, { attributes: true, attributeFilter: ["data-theme"] });
+    return () => observer.disconnect();
+  }, [chartReady]);
 
   // Set initial candle data
   useEffect(() => {
@@ -357,10 +440,11 @@ export function ExecutorChart({
     const mod = chartModuleRef.current;
     if (!series || !chart || !mod || !chartReady) return;
 
-    // Clean up old segment series
+    // Clean up old segment series and vertical lines
     for (const s of segmentSeriesRef.current) {
       try { chart.removeSeries(s); } catch { /* ok */ }
     }
+    gridVerticalLinesRef.current = [];
     segmentSeriesRef.current = [];
 
     const isMulti = overlays.length > 1;
@@ -415,32 +499,16 @@ export function ExecutorChart({
           ]);
           segmentSeriesRef.current.push(bottom);
 
-          // Left edge (vertical at start)
-          const left = chart.addSeries(mod.LineSeries, {
-            color: boxColor, lineWidth: 1,
-            priceLineVisible: false, lastValueVisible: false, crosshairMarkerVisible: false,
-          });
-          left.setData([
-            { time: t1 as TS, value: box.startPrice },
-            { time: (t1 + 1) as TS, value: box.endPrice },
-          ]);
-          segmentSeriesRef.current.push(left);
-
-          // Right edge (vertical at end)
-          const right = chart.addSeries(mod.LineSeries, {
-            color: boxColor, lineWidth: 1,
-            priceLineVisible: false, lastValueVisible: false, crosshairMarkerVisible: false,
-          });
-          right.setData([
-            { time: (t2 - 1) as TS, value: box.endPrice },
-            { time: t2 as TS, value: box.startPrice },
-          ]);
-          segmentSeriesRef.current.push(right);
+          // Vertical edges — drawn on canvas overlay (see drawVerticalLines)
+          gridVerticalLinesRef.current.push(
+            { time: t1, topPrice: box.endPrice, bottomPrice: box.startPrice, color: boxColor },
+            { time: t2, topPrice: box.endPrice, bottomPrice: box.startPrice, color: boxColor },
+          );
 
           // Limit price line (if present) — dotted red
           if (box.limitPrice) {
             const limit = chart.addSeries(mod.LineSeries, {
-              color: "#ef4444", lineWidth: 1, lineStyle: mod.LineStyle.Dotted,
+              color: getThemeColors().red, lineWidth: 1, lineStyle: mod.LineStyle.Dotted,
               priceLineVisible: false, lastValueVisible: false, crosshairMarkerVisible: false,
             });
             limit.setData([
@@ -481,6 +549,14 @@ export function ExecutorChart({
 
       segmentSeriesRef.current.push(lineSeries);
     });
+
+    // Trigger a redraw of grid vertical lines on the overlay canvas
+    if (gridVerticalLinesRef.current.length > 0) {
+      // Small delay to let chart render first
+      setTimeout(() => {
+        chart.timeScale().scrollToPosition(chart.timeScale().scrollPosition(), false);
+      }, 50);
+    }
   }, [overlays, chartReady]);
 
   // Position snapshot bubbles along the time axis
@@ -697,30 +773,33 @@ export function ExecutorChart({
           ref={containerRef}
           style={{ height: fullscreen ? "100%" : height, width: "100%" }}
         />
-        {/* Executor tooltip overlay */}
-        <div
-          ref={tooltipRef}
-          className="chart-tooltip"
-          style={{
-            display: "none",
-            position: "absolute",
-            top: 0,
-            left: 0,
-            zIndex: 10,
-            pointerEvents: "none",
-            background: "var(--color-surface)",
-            border: "1px solid var(--color-border)",
-            borderRadius: 6,
-            padding: "6px 10px",
-            fontSize: 11,
-            color: "var(--color-text)",
-            maxWidth: 280,
-            minWidth: 200,
-            lineHeight: 1.4,
-            backdropFilter: "blur(8px)",
-            boxShadow: "0 4px 16px rgba(0,0,0,0.2)",
-          }}
-        />
+        {/* Executor tooltip overlay — rendered via portal to escape overflow-hidden */}
+        {createPortal(
+          <div
+            ref={tooltipRef}
+            className="chart-tooltip"
+            style={{
+              display: "none",
+              position: "fixed",
+              top: 0,
+              left: 0,
+              zIndex: 9999,
+              pointerEvents: "none",
+              background: "var(--color-surface)",
+              border: "1px solid var(--color-border)",
+              borderRadius: 6,
+              padding: "6px 10px",
+              fontSize: 11,
+              color: "var(--color-text)",
+              maxWidth: 280,
+              minWidth: 200,
+              lineHeight: 1.4,
+              backdropFilter: "blur(8px)",
+              boxShadow: "0 4px 16px rgba(0,0,0,0.2)",
+            }}
+          />,
+          document.body,
+        )}
         {/* Snapshot tooltip overlay */}
         <div
           ref={snapshotTooltipRef}

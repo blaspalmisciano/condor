@@ -15,6 +15,7 @@ import {
   type FieldDispatch,
 } from "./fields";
 import type { ChartPriceMapping, ExecutorValidation, ExtraLine } from "./types";
+import { getThemeColors } from "@/lib/theme-colors";
 
 // ── State ──
 
@@ -141,7 +142,7 @@ export function usePositionConfig() {
       extras.push({
         price: tpPrice,
         label: `TP (${(state.take_profit * 100).toFixed(1)}%)`,
-        color: "#22c55e",
+        color: getThemeColors().green,
         lineStyle: "dashed",
         lineWidth: 2,
       });
@@ -151,7 +152,7 @@ export function usePositionConfig() {
       extras.push({
         price: slPrice,
         label: `SL (${(state.stop_loss * 100).toFixed(1)}%)`,
-        color: "#ef4444",
+        color: getThemeColors().red,
         lineStyle: "dashed",
         lineWidth: 2,
       });
@@ -216,14 +217,13 @@ export function usePositionConfig() {
 interface Props {
   state: PositionState;
   dispatch: React.Dispatch<PositionAction>;
+  validation: ExecutorValidation;
   currentPrice: number | null;
   isSpot?: boolean;
   pair?: string;
 }
 
-export function PositionConfigPanel({ state, dispatch, currentPrice, isSpot = false, pair }: Props) {
-  const validation = usePositionValidation(state);
-
+export function PositionConfigPanel({ state, dispatch, validation, currentPrice, isSpot = false, pair }: Props) {
   // Auto-fill entry price from current price on first load (if zero)
   useEffect(() => {
     if (state.entry_price === 0 && currentPrice && currentPrice > 0) {

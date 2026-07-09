@@ -11,12 +11,13 @@ Controller-specific code (defaults, fields, charts) is in handlers/bots/controll
 """
 
 import logging
+import re
 from typing import Any, Dict, List, Optional, Tuple
 
 from condor.cache import DEFAULT_CACHE_TTL
+from condor.cache import cached_call as _cached_call
 from condor.cache import get_cached as _get_cached
 from condor.cache import set_cached as _set_cached
-from condor.cache import cached_call as _cached_call
 
 logger = logging.getLogger(__name__)
 
@@ -134,7 +135,14 @@ async def get_bots_client(
 
 
 def clear_bots_state(context) -> None:
-    """Clear all bots-related state from user context
+    """Clear only bots-related state from user context.
+
+    This is a NARROW cleaner: it pops just the bots/archived/config-menu feature
+    keys and does NOT tear down unrelated state (active /trade SDS subscriptions,
+    portfolio cache, etc.). It is invoked mid/end of bots flows and on menu
+    re-entry (e.g. controller save, show_bots_menu), so it must not disturb a
+    user's live trade view. For full state resets on top-level command
+    entrypoints, use ``clear_all_input_states`` instead.
 
     Args:
         context: Telegram context object
@@ -151,6 +159,7 @@ def clear_bots_state(context) -> None:
     context.user_data.pop("archived_current_db", None)
     context.user_data.pop("archived_page", None)
     context.user_data.pop("archived_summaries", None)
+    context.user_data.pop("archived_total_count", None)
     # Config menu state
     context.user_data.pop("configs_controller_type", None)
     context.user_data.pop("configs_page", None)
@@ -178,6 +187,46 @@ def set_controller_config(context, config: Dict[str, Any]) -> None:
         config: Controller config dict
     """
     context.user_data["controller_config_params"] = config
+
+
+# Matches stringified enum values like "PositionMode.ONEWAY", "OrderType.LIMIT",
+# "TradeType.BUY" or the colon variant "PositionMode:ONEWAY". The class name is
+# PascalCase and the member starts with an uppercase letter, which avoids matching
+# legitimate values such as trading times ("09:30") or token symbols ("USDC.e").
+_ENUM_STR_RE = re.compile(r"^[A-Z][A-Za-z0-9_]*[.:][A-Z][A-Za-z0-9_]*$")
+
+
+def normalize_enum_value(value: Any) -> Any:
+    """Strip the enum-class prefix from stringified enum values.
+
+    Controller config templates expose enum defaults as strings like
+    "PositionMode.ONEWAY". Saving them verbatim breaks downstream controller
+    validation, which expects the plain member name ("ONEWAY"). This recurses
+    into dicts and lists so nested config values are normalized too.
+    """
+    if isinstance(value, str) and _ENUM_STR_RE.match(value):
+        return re.split(r"[.:]", value, maxsplit=1)[1]
+    if isinstance(value, dict):
+        return {k: normalize_enum_value(v) for k, v in value.items()}
+    if isinstance(value, list):
+        return [normalize_enum_value(v) for v in value]
+    return value
+
+
+def clean_config_for_save(config: Dict[str, Any]) -> Dict[str, Any]:
+    """Strip internal fields and normalize stringified enum values before saving.
+
+    The backend adds _config_name to YAML files, but Pydantic models with
+    extra='forbid' reject it on reload. Strip any underscore-prefixed keys
+    that aren't part of the controller config schema.
+
+    Enum fields (e.g. position_mode, side, take_profit_order_type) can arrive as
+    prefixed strings like "PositionMode.ONEWAY"; normalize them to the plain
+    member name so deploy/backtest validation accepts them.
+    """
+    return {
+        k: normalize_enum_value(v) for k, v in config.items() if not k.startswith("_")
+    }
 
 
 def init_new_controller_config(
@@ -287,7 +336,9 @@ def format_config_field_value(field_name: str, value: Any) -> str:
 _NS = "_bots_cache"
 
 
-def get_cached(user_data: dict, key: str, ttl: int = DEFAULT_CACHE_TTL) -> Optional[Any]:
+def get_cached(
+    user_data: dict, key: str, ttl: int = DEFAULT_CACHE_TTL
+) -> Optional[Any]:
     return _get_cached(user_data, key, ttl, namespace=_NS)
 
 
@@ -298,7 +349,9 @@ def set_cached(user_data: dict, key: str, value: Any) -> None:
 async def cached_call(
     user_data: dict, key: str, fetch_func, ttl: int = DEFAULT_CACHE_TTL, *args, **kwargs
 ) -> Any:
-    return await _cached_call(user_data, key, fetch_func, ttl, *args, namespace=_NS, **kwargs)
+    return await _cached_call(
+        user_data, key, fetch_func, ttl, *args, namespace=_NS, **kwargs
+    )
 
 
 # ============================================
@@ -306,7 +359,10 @@ async def cached_call(
 # ============================================
 
 
-from condor.fetchers.connectors import is_cex_connector, fetch_available_cex_connectors  # noqa: F811
+from condor.fetchers.connectors import (  # noqa: F811
+    fetch_available_cex_connectors,
+    is_cex_connector,
+)
 
 
 async def get_available_cex_connectors(
@@ -339,8 +395,7 @@ async def get_available_cex_connectors(
 # ============================================
 
 
-from condor.fetchers.market_data import fetch_current_price, fetch_candles  # noqa: F811
-
+from condor.fetchers.market_data import fetch_candles, fetch_current_price  # noqa: F811
 
 # ============================================
 # BACKWARDS COMPATIBILITY WRAPPERS

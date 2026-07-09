@@ -2,21 +2,71 @@
 
 from __future__ import annotations
 
+import asyncio
+import contextvars
+import html
 import json
 import logging
 import os
 import re
 import tempfile
 import uuid
+from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
 logger = logging.getLogger(__name__)
 
+# The ID of the last report saved by the current task. Runners reset it before
+# a routine's execution and read it back afterwards to attach the report to the
+# run. Task-local (ContextVar), so concurrent routine tasks don't steal each
+# other's report IDs.
+_last_report_id: contextvars.ContextVar[str | None] = contextvars.ContextVar(
+    "last_report_id", default=None
+)
+
+
+def reset_last_report_id() -> None:
+    """Clear the last-saved report ID for the current task (call before a run)."""
+    _last_report_id.set(None)
+
+
+def get_last_report_id() -> str | None:
+    """Return the ID of the last report saved by the current task, if any."""
+    return _last_report_id.get()
+
+
+# The assistant/expert a report is attributed to (the producer). Reports stay in
+# one flat store; this stamps each entry so the dashboard can filter by who made
+# it. Runners set it around a routine's execution; save() reads it. Defaults to
+# "condor" (the chat) when nothing set it. Task-local, so concurrent runs don't
+# leak attribution into each other.
+_report_agent: contextvars.ContextVar[str | None] = contextvars.ContextVar(
+    "report_agent", default=None
+)
+
+
+@contextmanager
+def attribute_to(agent: str | None):
+    """Attribute reports saved within this block to ``agent`` (an assistant slug).
+
+    Usage::
+
+        with attribute_to("executor_manager"):
+            await routine.run_fn(cfg, ctx)   # any report it saves is stamped
+    """
+    token = _report_agent.set(agent or None)
+    try:
+        yield
+    finally:
+        _report_agent.reset(token)
+
+
 CHARTS_DIR = Path(__file__).resolve().parent.parent / "reports"
 INDEX_FILE = CHARTS_DIR / "reports_index.json"
 MAX_REPORTS = int(os.environ.get("CONDOR_MAX_REPORTS", "100"))
+_index_lock = asyncio.Lock()
 
 # ── HTML Template ──
 
@@ -244,7 +294,6 @@ def _fallback_md_to_html(text: str) -> str:
             continue
 
         close_list()
-        # Collect consecutive non-blank, non-special lines into one paragraph
         para: list[str] = [stripped]
         i += 1
         while i < len(lines):
@@ -259,11 +308,27 @@ def _fallback_md_to_html(text: str) -> str:
     return "\n".join(out)
 
 
+def get_report_raw_html(report_id: str) -> tuple[str, str] | None:
+    """Return (raw_html, filename) of the report exactly as saved on disk.
+
+    This is the interactive report (live Plotly charts via CDN), suitable for
+    opening in a real browser.
+    """
+    entry = get_report(report_id)
+    if not entry:
+        return None
+    path = CHARTS_DIR / entry["filename"]
+    if not path.exists():
+        return None
+    return path.read_text(), entry["filename"]
+
+
 def _md_to_html(text: str) -> str:
     """Convert markdown to HTML. Prefers `markdown` lib; falls back to a minimal
     stdlib renderer if the package isn't importable in this interpreter."""
     try:
         import markdown
+
         return markdown.markdown(text, extensions=["fenced_code", "tables"])
     except Exception as e:
         logger.warning(f"markdown library unavailable ({e!r}); using stdlib fallback renderer")
@@ -309,6 +374,7 @@ def list_reports(
     source_type: str | None = None,
     tag: str | None = None,
     search: str | None = None,
+    agent: str | None = None,
     limit: int = 50,
     offset: int = 0,
 ) -> tuple[list[dict], int]:
@@ -320,10 +386,13 @@ def list_reports(
         entries = [e for e in entries if e.get("source_type") == source_type]
     if tag:
         entries = [e for e in entries if tag in e.get("tags", [])]
+    if agent:
+        entries = [e for e in entries if e.get("agent") == agent]
     if search:
         q = search.lower()
         entries = [
-            e for e in entries
+            e
+            for e in entries
             if q in e.get("title", "").lower()
             or q in e.get("source_name", "").lower()
             or any(q in t.lower() for t in e.get("tags", []))
@@ -355,7 +424,9 @@ def list_reports_grouped() -> list[dict]:
             groups[sn]["all_tags"].update(e.get("tags", []))
     for g in groups.values():
         g["all_tags"] = sorted(g["all_tags"])
-    return sorted(groups.values(), key=lambda g: g["latest_report"]["created_at"], reverse=True)
+    return sorted(
+        groups.values(), key=lambda g: g["latest_report"]["created_at"], reverse=True
+    )
 
 
 def get_report(report_id: str) -> dict | None:
@@ -365,24 +436,26 @@ def get_report(report_id: str) -> dict | None:
     return None
 
 
-def delete_report(report_id: str) -> bool:
-    entries = _read_index()
-    new_entries = []
-    deleted = False
-    for e in entries:
-        if e["id"] == report_id:
-            fpath = CHARTS_DIR / e["filename"]
-            if fpath.exists():
-                fpath.unlink()
-            deleted = True
-        else:
-            new_entries.append(e)
-    if deleted:
-        _write_index(new_entries)
+async def delete_report(report_id: str) -> bool:
+    async with _index_lock:
+        entries = _read_index()
+        new_entries = []
+        deleted = False
+        for e in entries:
+            if e["id"] == report_id:
+                fpath = CHARTS_DIR / e["filename"]
+                if fpath.exists():
+                    fpath.unlink()
+                deleted = True
+            else:
+                new_entries.append(e)
+        if deleted:
+            _write_index(new_entries)
     return deleted
 
 
-def _cleanup(max_reports: int = MAX_REPORTS) -> None:
+def _cleanup_locked(max_reports: int = MAX_REPORTS) -> None:
+    """Run cleanup while caller already holds _index_lock."""
     entries = _read_index()
     if len(entries) <= max_reports:
         return
@@ -424,8 +497,18 @@ class ReportBuilder:
         self._manual_order = True
         return self
 
-    def kpi(self, label: str, value: str, delta: str | None = None, trend: str = "neutral") -> ReportBuilder:
-        self._sections.append({"type": "kpi", "label": label, "value": value, "delta": delta, "trend": trend})
+    def kpi(
+        self, label: str, value: str, delta: str | None = None, trend: str = "neutral"
+    ) -> ReportBuilder:
+        self._sections.append(
+            {
+                "type": "kpi",
+                "label": label,
+                "value": value,
+                "delta": delta,
+                "trend": trend,
+            }
+        )
         return self
 
     def markdown(self, text: str) -> ReportBuilder:
@@ -437,59 +520,95 @@ class ReportBuilder:
         self._sections.append({"type": "plotly", "content": html})
         return self
 
-    def table(self, rows: list[dict], columns: list[str] | None = None) -> ReportBuilder:
+    def table(
+        self, rows: list[dict], columns: list[str] | None = None
+    ) -> ReportBuilder:
         if not columns and rows:
             columns = list(rows[0].keys())
         self._sections.append({"type": "table", "columns": columns or [], "rows": rows})
         return self
 
-    def save(self) -> str:
+    async def save(self, report_id: str | None = None) -> str:
+        """Save the report as an HTML file.
+
+        Args:
+            report_id: If provided, update an existing report in place.
+                       If None (default), create a new report.
+        """
         CHARTS_DIR.mkdir(exist_ok=True)
-        report_id = uuid.uuid4().hex[:6]
         now = datetime.now(timezone.utc)
-        ts_str = now.strftime("%Y%m%d_%H%M%S")
-        slug = _slugify(self._title)
-        filename = f"{ts_str}_{slug}_{report_id}.html"
 
         sections_html = self._render_sections()
         meta_badges = ""
         if self._source_type:
-            meta_badges += f"<span>{self._source_type}: {self._source_name}</span>"
+            meta_badges += (
+                f"<span>{html.escape(str(self._source_type))}: "
+                f"{html.escape(str(self._source_name))}</span>"
+            )
         for tag in self._tags:
-            meta_badges += f"<span>#{tag}</span>"
+            meta_badges += f"<span>#{html.escape(str(tag))}</span>"
 
-        html = _HTML_TEMPLATE.format(
-            title=self._title,
+        html_content = _HTML_TEMPLATE.format(
+            title=html.escape(str(self._title)),
             created_at=now.strftime("%Y-%m-%d %H:%M UTC"),
             meta_badges=meta_badges,
             sections_html=sections_html,
         )
 
-        (CHARTS_DIR / filename).write_text(html)
+        async with _index_lock:
+            if report_id is not None:
+                # Update existing report
+                entries = _read_index()
+                entry = next((e for e in entries if e["id"] == report_id), None)
+                if entry is None:
+                    raise ValueError(f"Report '{report_id}' not found in index")
 
-        entry = {
-            "id": report_id,
-            "title": self._title,
-            "filename": filename,
-            "created_at": now.isoformat(),
-            "source_type": self._source_type,
-            "source_name": self._source_name,
-            "tags": self._tags,
-        }
+                (CHARTS_DIR / entry["filename"]).write_text(html_content)
 
-        entries = _read_index()
-        entries.append(entry)
-        _write_index(entries)
-        _cleanup()
+                entry["updated_at"] = now.isoformat()
+                entry["title"] = self._title
+                entry["tags"] = self._tags
+                _write_index(entries)
 
+                _last_report_id.set(report_id)
+                logger.info(f"Report updated: {entry['filename']}")
+                return report_id
+
+            # New report
+            new_id = uuid.uuid4().hex[:6]
+            ts_str = now.strftime("%Y%m%d_%H%M%S")
+            slug = _slugify(self._title)
+            filename = f"{ts_str}_{slug}_{new_id}.html"
+
+            (CHARTS_DIR / filename).write_text(html_content)
+
+            entry = {
+                "id": new_id,
+                "title": self._title,
+                "filename": filename,
+                "created_at": now.isoformat(),
+                "source_type": self._source_type,
+                "source_name": self._source_name,
+                "tags": self._tags,
+                "agent": _report_agent.get() or "condor",
+            }
+
+            entries = _read_index()
+            entries.append(entry)
+            _write_index(entries)
+            _cleanup_locked()
+
+        _last_report_id.set(new_id)
         logger.info(f"Report saved: {filename}")
-        return report_id
+        return new_id
 
     def _render_sections(self) -> str:
         sections = list(self._sections)
         if not self._manual_order:
             # Stable sort: kpi first, then plotly, table, markdown
-            sections = sorted(sections, key=lambda s: _SECTION_PRIORITY.get(s["type"], 99))
+            sections = sorted(
+                sections, key=lambda s: _SECTION_PRIORITY.get(s["type"], 99)
+            )
 
         parts = []
         i = 0
@@ -506,19 +625,24 @@ class ReportBuilder:
                     delta_html = ""
                     if k["delta"]:
                         cls = f' {k["trend"]}' if k["trend"] in ("up", "down") else ""
-                        delta_html = f'<div class="delta{cls}">{k["delta"]}</div>'
+                        delta = html.escape(str(k["delta"]))
+                        delta_html = f'<div class="delta{cls}">{delta}</div>'
                     cards.append(
                         f'<div class="kpi-card">'
-                        f'<div class="label">{k["label"]}</div>'
-                        f'<div class="value">{k["value"]}</div>'
-                        f'{delta_html}</div>'
+                        f'<div class="label">{html.escape(str(k["label"]))}</div>'
+                        f'<div class="value">{html.escape(str(k["value"]))}</div>'
+                        f"{delta_html}</div>"
                     )
                 parts.append(f'<div class="kpi-bar">{"".join(cards)}</div>')
             elif sec["type"] == "markdown":
-                parts.append(f'<div class="section section-md">{_md_to_html(sec["content"])}</div>')
+                parts.append(
+                    f'<div class="section section-md">{_md_to_html(sec["content"])}</div>'
+                )
                 i += 1
             elif sec["type"] == "plotly":
-                parts.append(f'<div class="section plotly-chart">{sec["content"]}</div>')
+                parts.append(
+                    f'<div class="section plotly-chart">{sec["content"]}</div>'
+                )
                 i += 1
             elif sec["type"] == "table":
                 parts.append(self._render_table(sec["columns"], sec["rows"]))
@@ -529,10 +653,52 @@ class ReportBuilder:
 
     @staticmethod
     def _render_table(columns: list[str], rows: list[dict]) -> str:
-        header = "".join(f"<th>{c}</th>" for c in columns)
+        header = "".join(f"<th>{html.escape(str(c))}</th>" for c in columns)
         body_rows = []
         for row in rows:
-            cells = "".join(f"<td>{row.get(c, '')}</td>" for c in columns)
+            cells = "".join(
+                f"<td>{html.escape(str(row.get(c, '')))}</td>" for c in columns
+            )
             body_rows.append(f"<tr>{cells}</tr>")
         body = "\n".join(body_rows)
         return f'<div class="section section-table"><table><thead><tr>{header}</tr></thead><tbody>{body}</tbody></table></div>'
+
+
+# ── LiveReport ──
+
+
+class LiveReport:
+    """Updatable report for continuous routines.
+
+    Creates a single report on first update, then overwrites it on each
+    subsequent call. Ideal for continuous routines that accumulate data.
+    """
+
+    def __init__(
+        self, title: str, source_name: str = "", tags: list[str] | None = None
+    ):
+        self._title = title
+        self._source_name = source_name
+        self._tags = tags or []
+        self._report_id: str | None = None
+        self._builder: ReportBuilder | None = None
+        self.clear()
+
+    @property
+    def report_id(self) -> str | None:
+        return self._report_id
+
+    @property
+    def builder(self) -> ReportBuilder:
+        return self._builder
+
+    def clear(self) -> None:
+        """Reset builder for a fresh render cycle."""
+        self._builder = ReportBuilder(self._title)
+        self._builder.source("routine", self._source_name)
+        self._builder.tags(self._tags)
+
+    async def update(self) -> str:
+        """Save or update the report. Returns report_id."""
+        self._report_id = await self._builder.save(report_id=self._report_id)
+        return self._report_id

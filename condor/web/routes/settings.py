@@ -173,7 +173,7 @@ async def gateway_pull(
         parts = req.image.rsplit(":", 1)
         image_name = parts[0]
         tag = parts[1] if len(parts) > 1 else "latest"
-        result = await client.docker._post("/docker/pull-image/", json={"image_name": image_name, "tag": tag})
+        result = await client.docker.pull_image(image_name, tag)
         return {"pulled": True, "image": req.image, "result": result}
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
@@ -208,9 +208,7 @@ async def gateway_start(
     try:
         result = await client.gateway.start({
             "image": req.image,
-            "passphrase": req.passphrase,
             "port": req.port,
-            "dev_mode": req.dev_mode,
         })
         return {"started": True, "result": result}
     except Exception as e:
@@ -431,9 +429,11 @@ async def delete_credential(
             account_name="master_account",
             connector_name=connector,
         )
-        # Invalidate configured connectors cache
+        # Invalidate configured connectors + portfolio caches so the removed key disappears immediately
         from condor.server_data_service import ServerDataType, get_server_data_service
-        get_server_data_service().invalidate(server, ServerDataType.CONNECTORS)
+        sds = get_server_data_service()
+        sds.invalidate(server, ServerDataType.CONNECTORS)
+        sds.invalidate(server, ServerDataType.PORTFOLIO)
         return {"deleted": True, "result": result}
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))

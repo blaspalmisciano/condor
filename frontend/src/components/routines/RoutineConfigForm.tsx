@@ -1,6 +1,6 @@
 import { useQuery } from "@tanstack/react-query";
 import { ChevronDown } from "lucide-react";
-import { useEffect } from "react";
+import { useEffect, useState } from "react";
 
 import type { RoutineFieldInfo } from "@/lib/api";
 import { api } from "@/lib/api";
@@ -31,12 +31,18 @@ function SelectField({
 
   const options = data?.options ?? [];
 
-  // Auto-select first option when options load and no value is set
+  // Auto-select first option ONLY when no value is set. A non-empty persisted
+  // value is preserved even if it's absent from the currently loaded options
+  // (e.g. server/pair temporarily unavailable, server-scoped options).
   useEffect(() => {
-    if (options.length > 0 && (!value || value === "")) {
-      onChange(options[0]);
-    }
-  }, [options, value, onChange]);
+    if (options.length === 0) return;
+    if (value != null && value !== "") return;
+    onChange(options[0]);
+    // onChange is an unstable inline closure from the parent; depending on it
+    // would re-run this effect every parent render. The auto-select trigger
+    // only depends on options/value, so we intentionally omit it.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [options, value]);
 
   return (
     <div className="relative">
@@ -78,8 +84,6 @@ function MultiselectField({
   });
 
   const options = data?.options ?? [];
-  // Value is stored as a CSV string (matches the routine's Pydantic `str`
-  // field). Empty = "all selected"; any non-empty = filter to those items.
   const raw = String(value ?? field.default ?? "");
   const selected = new Set(
     raw.split(",").map((s) => s.trim()).filter(Boolean),
@@ -142,6 +146,37 @@ function MultiselectField({
   );
 }
 
+function NumberField({
+  fieldType,
+  value,
+  onChange,
+}: {
+  fieldType: string;
+  value: unknown;
+  onChange: (v: number) => void;
+}) {
+  const [draft, setDraft] = useState(String(value ?? ""));
+
+  useEffect(() => {
+    setDraft(String(value ?? ""));
+  }, [value]);
+
+  return (
+    <input
+      type="number"
+      step={fieldType === "float" ? "any" : "1"}
+      value={draft}
+      onChange={(e) => setDraft(e.target.value)}
+      onBlur={() => {
+        const v = fieldType === "int" ? parseInt(draft) : parseFloat(draft);
+        if (!isNaN(v)) onChange(v);
+        else setDraft(String(value ?? ""));
+      }}
+      className="w-full rounded border border-[var(--color-border)] bg-[var(--color-surface)] px-3 py-1.5 text-sm text-[var(--color-text)] focus:border-[var(--color-primary)] focus:outline-none"
+    />
+  );
+}
+
 export function RoutineConfigForm({ fields, values, onChange }: Props) {
   return (
     <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-3">
@@ -175,15 +210,10 @@ export function RoutineConfigForm({ fields, values, onChange }: Props) {
               {values[key] ? "ON" : "OFF"}
             </button>
           ) : field.type === "int" || field.type === "float" ? (
-            <input
-              type="number"
-              step={field.type === "float" ? "any" : "1"}
-              value={String(values[key] ?? field.default ?? "")}
-              onChange={(e) => {
-                const v = field.type === "int" ? parseInt(e.target.value) : parseFloat(e.target.value);
-                if (!isNaN(v)) onChange(key, v);
-              }}
-              className="w-full rounded border border-[var(--color-border)] bg-[var(--color-surface)] px-3 py-1.5 text-sm text-[var(--color-text)] focus:border-[var(--color-primary)] focus:outline-none"
+            <NumberField
+              fieldType={field.type}
+              value={values[key] ?? field.default ?? ""}
+              onChange={(v) => onChange(key, v)}
             />
           ) : (
             <input

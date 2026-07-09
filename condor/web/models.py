@@ -55,6 +55,7 @@ class ConnectorBalance(BaseModel):
     connector: str
     balances: list[BalanceItem]
     total_usd: float = 0.0
+    note: str | None = None
 
 
 class PortfolioResponse(BaseModel):
@@ -129,6 +130,65 @@ class BotsPageResponse(BaseModel):
     bots: list[BotSummary] = []
     total_pnl: float = 0.0
     total_volume: float = 0.0
+    server_online: bool = True
+    error_hint: Optional[str] = None
+
+
+# ── Bot Runs ──
+
+
+class BotRunInfo(BaseModel):
+    bot_name: str
+    bot_run_id: Optional[int] = None
+    account_name: str = ""
+    strategy_type: str = ""
+    strategy_name: str = ""
+    run_status: str = ""
+    deployment_status: str = ""
+    created_at: Optional[str] = None
+    stopped_at: Optional[str] = None
+    realized_pnl_quote: float = 0.0
+    unrealized_pnl_quote: float = 0.0
+    global_pnl_quote: float = 0.0
+    volume_traded: float = 0.0
+    num_controllers: int = 0
+
+
+class BotRunsResponse(BaseModel):
+    runs: list[BotRunInfo] = []
+    total: int = 0
+
+
+# ── Controller Performance ──
+
+
+class ControllerPerformanceSnapshot(BaseModel):
+    timestamp: str = ""
+    bot_name: str = ""
+    controller_id: str = ""
+    controller_name: str = ""
+    connector: str = ""
+    trading_pair: str = ""
+    realized_pnl_quote: float = 0.0
+    unrealized_pnl_quote: float = 0.0
+    global_pnl_quote: float = 0.0
+    global_pnl_pct: float = 0.0
+    volume_traded: float = 0.0
+    close_type_counts: dict[str, int] = {}
+    positions_summary: list[dict[str, Any]] = []
+    custom_info: dict[str, Any] = {}
+
+
+class ControllerPerformanceLatestResponse(BaseModel):
+    snapshots: list[ControllerPerformanceSnapshot] = []
+    server_online: bool = True
+    error_hint: Optional[str] = None
+
+
+class ControllerPerformanceHistoryResponse(BaseModel):
+    snapshots: list[ControllerPerformanceSnapshot] = []
+    next_cursor: Optional[str] = None
+    interval: str = "5m"
     server_online: bool = True
     error_hint: Optional[str] = None
 
@@ -328,6 +388,7 @@ class ReportSummary(BaseModel):
     source_type: str = ""
     source_name: str = ""
     tags: list[str] = []
+    agent: str = ""  # producing assistant/expert (e.g. "condor", "executor_manager")
 
 
 class ReportsListResponse(BaseModel):
@@ -354,10 +415,10 @@ class UpdateServerRequest(BaseModel):
 
 
 class GatewayStartRequest(BaseModel):
+    # The Hummingbot API always runs the Gateway secured (TLS + mTLS) and manages the
+    # certificates/passphrase itself (hummingbot-api SEC-048), so only image/port are sent.
     image: str = "hummingbot/gateway:latest"
-    passphrase: str
     port: int = 15888
-    dev_mode: bool = True
 
 
 class CredentialInfo(BaseModel):
