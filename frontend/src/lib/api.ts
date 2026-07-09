@@ -390,7 +390,7 @@ export interface RoutineFieldInfo {
   type: string;
   default: unknown;
   description: string;
-  widget?: "select";
+  widget?: "select" | "multiselect";
   options_from?: string;
 }
 

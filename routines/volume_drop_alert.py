@@ -71,6 +71,14 @@ class Config(BaseModel):
         default=0.00015,
         description="Estimated maker rebate as a fraction of traded volume (e.g. 0.00015 = 0.015%%). Used for the 24h yield calc.",
     )
+    stale_minutes: int = Field(
+        default=30,
+        description="Mark a controller/bot STALE (loud alert) when reported volume hasn't moved for at least this many minutes while the bot is RUNNING. This is the zombie-detector: process up, trading dead.",
+    )
+    recent_pace_minutes: int = Field(
+        default=60,
+        description="Window used to compute the bot's *current* pace. Smaller = faster reaction to slowdowns; should be ≥ 2× schedule cadence so we have ≥ 2 snapshots.",
+    )
 
 
 def _load_state(path: Path) -> dict:
@@ -129,6 +137,47 @@ def _bucket_volumes(snapshots: list, interval_sec: float, now: float) -> list[fl
         v = vol_at(end_ts) - vol_at(start_ts)
         buckets.append(max(v, 0.0))
     return buckets
+
+
+def _recent_pace_and_flat(snapshots: list, now: float, recent_window_sec: float) -> tuple[float, float, int]:
+    """Compute the controller's *current* pace and how long it's been frozen.
+
+    Returns ``(recent_pace_per_sec, flat_minutes, n_recent_snaps)``:
+    - ``recent_pace_per_sec`` — volume delta over the last ``recent_window_sec``
+      of snapshots, divided by the actual span those snapshots cover (USD/sec
+      in the snapshot's currency). 0 if we don't have ≥ 2 snaps in the window
+      or if the volume hasn't moved.
+    - ``flat_minutes`` — walking back from the most recent snapshot, the
+      longest contiguous stretch where ``total_volume`` equals the latest
+      value. This is the zombie-detector signal: a healthy bot churns volume
+      every poll, so a long flat tail means trading died.
+    - ``n_recent_snaps`` — how many snapshots fell inside the recent window.
+
+    The recent-window pace replaces the old full-rolling-window pace which
+    averaged staleness against 50h of healthy history and silently masked the
+    "process up, trading dead" failure mode.
+    """
+    if not snapshots:
+        return 0.0, 0.0, 0
+    cutoff = now - recent_window_sec
+    recent = [s for s in snapshots if s["ts"] >= cutoff]
+    recent_pace = 0.0
+    if len(recent) >= 2:
+        t_span = recent[-1]["ts"] - recent[0]["ts"]
+        v_span = max(recent[-1]["total_volume"] - recent[0]["total_volume"], 0.0)
+        if t_span > 0:
+            recent_pace = v_span / t_span
+
+    latest_vol = snapshots[-1]["total_volume"]
+    latest_ts = snapshots[-1]["ts"]
+    flat_since_ts = latest_ts
+    for s in reversed(snapshots[:-1]):
+        if s["total_volume"] == latest_vol:
+            flat_since_ts = s["ts"]
+        else:
+            break
+    flat_minutes = max(latest_ts - flat_since_ts, 0.0) / 60.0
+    return recent_pace, flat_minutes, len(recent)
 
 
 def _format_bot_summary(targets: dict, interval_min: int, now: float) -> str:
@@ -795,6 +844,9 @@ async def run(config: Config, context: ContextTypes.DEFAULT_TYPE) -> str:
 
     bots_state = state.setdefault("bots", {})
     interval_sec = interval_min * 60
+    # Recent window for *current* pace — clamp to ≥ 2× interval so we always
+    # have at least 2 snapshots, even when the user lowers recent_pace_minutes.
+    recent_pace_sec = max(config.recent_pace_minutes * 60, 2 * interval_sec)
     usd_cache: dict = {}
 
     # ─── Pass 1: per-controller analysis ───
@@ -813,7 +865,7 @@ async def run(config: Config, context: ContextTypes.DEFAULT_TYPE) -> str:
             "connector_str": connector_str,
             "total_vol": total_vol,
             "earliest_ts": earliest_ts,
-            "kind": "ok",  # ok | too_young | first | alert
+            "kind": "ok",  # ok | too_young | first | alert | stale
             "last_window_vol": 0.0,
             "baseline": 0.0,
             "baseline_source": "",
@@ -821,6 +873,8 @@ async def run(config: Config, context: ContextTypes.DEFAULT_TYPE) -> str:
             "n_buckets": 0,
             "n_active": 0,
             "triggered": False,
+            "stale": False,
+            "flat_minutes": 0.0,
         }
 
         # Pin started_at on first observation. The log-derived value from
@@ -893,7 +947,19 @@ async def run(config: Config, context: ContextTypes.DEFAULT_TYPE) -> str:
         if ctrl["baseline"] > 0:
             ctrl["ratio_pct"] = ctrl["last_window_vol"] / ctrl["baseline"] * 100.0
             ctrl["triggered"] = ctrl["last_window_vol"] <= ctrl["baseline"] * threshold_ratio
-        if ctrl["triggered"]:
+
+        # ── Zombie / stale detection ──
+        # Reported `volume_traded` hasn't moved for ≥ stale_minutes while the
+        # controller is supposedly RUNNING → process up, trading dead. This is
+        # the case the median-of-buckets rule cannot catch (all buckets are
+        # zero, baseline = 0, ratio undefined). Treat as a loud alert.
+        _, ctrl["flat_minutes"], _ = _recent_pace_and_flat(snapshots, now, recent_pace_sec)
+        snap_span_min = (snapshots[-1]["ts"] - snapshots[0]["ts"]) / 60.0
+        if snap_span_min >= config.stale_minutes and ctrl["flat_minutes"] >= config.stale_minutes:
+            ctrl["stale"] = True
+            ctrl["triggered"] = True
+            ctrl["kind"] = "stale"
+        elif ctrl["triggered"]:
             ctrl["kind"] = "alert"
 
         per_ctrl[key] = ctrl
@@ -1072,19 +1138,48 @@ async def run(config: Config, context: ContextTypes.DEFAULT_TYPE) -> str:
                 f"⚪ Trailing off — starts when profit ≥ {config.trailing_activation_pct:+.2f}%"
             )
 
-        # Pace from monitored snapshots (not from broken started_at)
-        # Aggregate monitored span across the bot's controllers
-        bot_monitored_pace = 0.0
-        bot_monitored_span_min = 0.0
+        # ── Recent-window pace + zombie detection ──
+        # `bot_recent_pace` is the volume rate over the last
+        # `recent_pace_minutes` of snapshots (NOT the full 50h rolling window).
+        # A flat last hour drops it to 0 immediately, which is exactly what we
+        # want — a healthy bot's pace should reflect *now*, not its lifetime
+        # average.
+        # `bot_max_flat_min` is the longest contiguous "no movement" tail
+        # across the bot's controllers — the zombie signal. We also track
+        # `bot_has_long_history` so we only flag stale when the snapshot span
+        # is long enough to be meaningful.
+        bot_recent_pace = 0.0  # raw quote per second, summed across controllers
+        bot_max_flat_min = 0.0
+        bot_min_flat_min = float("inf")
+        bot_has_long_history = False
+        bot_n_snap_ctrls = 0
         for key in keys:
             cs = controllers_state.get(key, {})
             snaps = cs.get("snapshots", [])
-            if len(snaps) >= 2:
-                t_span = snaps[-1]["ts"] - snaps[0]["ts"]
-                v_span = max(snaps[-1]["total_volume"] - snaps[0]["total_volume"], 0.0)
-                if t_span > 0:
-                    bot_monitored_pace += (v_span / t_span) * interval_sec
-                    bot_monitored_span_min = max(bot_monitored_span_min, t_span / 60.0)
+            if len(snaps) < 2:
+                continue
+            bot_n_snap_ctrls += 1
+            snap_span_min = (snaps[-1]["ts"] - snaps[0]["ts"]) / 60.0
+            if snap_span_min >= config.stale_minutes:
+                bot_has_long_history = True
+            rp, fm, _ = _recent_pace_and_flat(snaps, now, recent_pace_sec)
+            bot_recent_pace += rp
+            if fm > bot_max_flat_min:
+                bot_max_flat_min = fm
+            if fm < bot_min_flat_min:
+                bot_min_flat_min = fm
+        if bot_min_flat_min == float("inf"):
+            bot_min_flat_min = 0.0
+
+        # A bot is STALE when EVERY snapshot-bearing controller has been
+        # frozen for ≥ stale_minutes (min_flat_min ≥ threshold). If even one
+        # controller is alive, the bot isn't a zombie — it's just partially
+        # idle, and the per-controller alerts handle that.
+        bot_is_stale = (
+            bot_n_snap_ctrls > 0
+            and bot_has_long_history
+            and bot_min_flat_min >= config.stale_minutes
+        )
 
         # ── Running-executor pace (the ONLY volume signal we trust) ──
         # Each running executor's filled / its own runtime = a clean steady
@@ -1129,29 +1224,35 @@ async def run(config: Config, context: ContextTypes.DEFAULT_TYPE) -> str:
             dominant in ("position", "dca", "order") or agg_vol > 0
         )
 
-        bot_pace_src = "snap"  # 'snap' | 'lifetime' | 'none'
+        # `bot_pace_src` tags the provenance of the displayed pace:
+        #   'snap'    — recent-window snapshot delta (the truth)
+        #   'stale'   — recent_pace = 0 and bot is frozen ≥ stale_minutes
+        #   'cold'    — we don't have enough recent snapshots yet (just booted)
+        #   'none'    — no signal at all
+        # We INTENTIONALLY no longer fall back to a lifetime average. That
+        # fallback masked the zombie case: a dead bot with 200h of healthy
+        # history would show its lifetime avg as "current pace" and the
+        # baseline (also lifetime avg) would say "✅ 95%", suppressing the
+        # alert. The whole point of this routine is to detect dead volume —
+        # so we now surface "0 USD/hr — STALE" instead.
+        bot_pace_src = "snap"
         if is_pmm_style:
-            # Source the header metrics from bot orchestration + monitored
+            # Source the header metrics from bot orchestration + recent
             # snapshots. `agg_vol`/`agg_pnl` are cumulative lifetime values
             # from `volume_traded` and (realized + unrealized), already in
-            # display currency. `bot_monitored_pace` is in raw quote currency
-            # per interval — convert to display currency per hour.
+            # display currency. `bot_recent_pace` is in raw quote currency
+            # per second — convert to display currency per hour.
             pace_rate = rate if rate else 1.0
-            run_pace_hr = bot_monitored_pace * pace_rate * (3600.0 / interval_sec)
+            run_pace_hr = bot_recent_pace * pace_rate * 3600.0
             run_filled = agg_vol
             run_pnl = agg_pnl
-            n_running_grids = len(keys)  # one row per active controller
-            # Fallback when we don't have 2 snapshots yet: estimate from
-            # lifetime cumulative volume divided by bot age. Surfaces a real
-            # number immediately instead of showing 0/starting.
+            n_running_grids = len(keys)
             if run_pace_hr <= 0:
-                deploy_ts_bot = _bot_deploy_ts(bot_name)
-                if deploy_ts_bot:
-                    age = max(now - deploy_ts_bot, 0.0)
-                    if age > 0 and agg_vol > 0:
-                        run_pace_hr = agg_vol / age * 3600.0
-                        bot_pace_src = "lifetime"
-                if run_pace_hr <= 0:
+                if bot_is_stale:
+                    bot_pace_src = "stale"
+                elif bot_n_snap_ctrls == 0 or not bot_has_long_history:
+                    bot_pace_src = "cold"
+                else:
                     bot_pace_src = "none"
         run_pace_day = run_pace_hr * 24.0
 
@@ -1204,7 +1305,10 @@ async def run(config: Config, context: ContextTypes.DEFAULT_TYPE) -> str:
             if len(pace_hist) >= config.min_intervals
             else None
         )
-        bot_pace_triggered = (
+        # Stale always trips, regardless of baseline state — that's the whole
+        # point of zombie detection. Otherwise the median-vs-recent rule
+        # applies as before.
+        bot_pace_triggered = bot_is_stale or (
             baseline_pace is not None
             and baseline_pace > 0
             and run_pace_hr <= baseline_pace * threshold_ratio
@@ -1257,10 +1361,22 @@ async def run(config: Config, context: ContextTypes.DEFAULT_TYPE) -> str:
             f"*{bot_pnl_incl:+,.0f} {cur}*",
             f"     _market {run_pnl:+,.0f} · rebates {bot_reb_lifetime:+,.0f} {cur}_",
             f"⚡ _Pace:_ *{run_pace_hr:,.0f} {cur}/hr*  ·  *{run_pace_day:,.0f} {cur}/day*"
-            + (" _(lifetime avg)_" if bot_pace_src == "lifetime" else ""),
+            + (f"  ·  🚨 *STALE — frozen {bot_max_flat_min:.0f} min*"
+               if bot_pace_src == "stale"
+               else (" _(no recent snapshots — warming up)_" if bot_pace_src == "cold"
+                     else (" _(no signal)_" if bot_pace_src == "none" else ""))),
             yield_line,
         ]
-        if baseline_pace is None:
+        if bot_is_stale:
+            # Explicit zombie line — bypass the median-vs-current framing
+            # entirely. A frozen bot has no "normal" to compare against; the
+            # only relevant fact is that trading died while the process is up.
+            header_lines.append(
+                f"🚨 _BOT NOT TRADING_ — `volume_traded` hasn't moved for "
+                f"≥ *{bot_max_flat_min:.0f} min* "
+                f"(threshold {config.stale_minutes}m). Process up, trading dead."
+            )
+        elif baseline_pace is None:
             n_so_far = len(pace_hist)
             header_lines.append(
                 f"📊 _vs normal:_ building history ({n_so_far}/{config.min_intervals})"
@@ -1409,7 +1525,16 @@ async def run(config: Config, context: ContextTypes.DEFAULT_TYPE) -> str:
                         f"{yi} _24h yield (on capital):_ *{yield_pct:+.3f}%*{proj_tag}\n"
                         f"     _24h market {p24:+,.0f} · 24h rebates {reb24:+,.0f} {cur}_"
                     )
-                pace_tag = " _(lifetime avg)_" if ctrl_pace_src == "lifetime" else ""
+                # Stale wins over every other tag — and we force the displayed
+                # pace to 0 so the eye doesn't skip over a misleading lifetime
+                # average. Otherwise we just drop the old "(lifetime avg)" tag
+                # entirely; it hid the zombie case and added no value.
+                ctrl_meta = per_ctrl.get(key, {})
+                if ctrl_meta.get("stale"):
+                    pace_tag = f"  ·  🚨 *STALE — frozen {ctrl_meta.get('flat_minutes', 0):.0f}m*"
+                    ctrl_pace = 0.0
+                else:
+                    pace_tag = ""
                 # Per-row title uses the actual controller_name so chessboard
                 # / pmm_mister / etc. each read as themselves instead of a
                 # generic "PMM controller".
@@ -1662,16 +1787,51 @@ async def run(config: Config, context: ContextTypes.DEFAULT_TYPE) -> str:
         kb = InlineKeyboardMarkup(alert_rows) if alert_rows else None
         # Alert → ring. No alert → silent push (message appears, no sound/badge).
         silent_push = not alert_rows
-        try:
-            await bot.send_message(
-                chat_id=chat_id,
-                text=unified_text,
-                parse_mode="Markdown",
-                reply_markup=kb,
-                disable_notification=silent_push,
-            )
-        except Exception as e:
-            logger.warning("Failed to send unified message: %s", e)
+
+        # Telegram caps messages at 4096 chars. With many controllers the
+        # combined message has overflowed (returning HTTP 400 "Message is
+        # too long"). Split at blank-line boundaries so Markdown spans
+        # (bold / italic / code) stay intact within each chunk.
+        TG_MAX_CHARS = 3800  # buffer under the 4096 ceiling for safety
+
+        def _chunk_for_telegram(text: str, limit: int = TG_MAX_CHARS) -> list[str]:
+            if len(text) <= limit:
+                return [text]
+            chunks: list[str] = []
+            remaining = text
+            while len(remaining) > limit:
+                # Prefer splitting on a blank line; fall back to a single
+                # newline; last resort = hard split.
+                cut = remaining.rfind("\n\n", 0, limit)
+                if cut <= 0:
+                    cut = remaining.rfind("\n", 0, limit)
+                if cut <= 0:
+                    cut = limit
+                chunks.append(remaining[:cut].rstrip())
+                remaining = remaining[cut:].lstrip("\n")
+            if remaining:
+                chunks.append(remaining)
+            return chunks
+
+        message_chunks = _chunk_for_telegram(unified_text)
+        last_idx = len(message_chunks) - 1
+        for i, chunk in enumerate(message_chunks):
+            # Attach the inline keyboard only to the last chunk so the
+            # alert buttons appear at the bottom of the conversation.
+            is_last = i == last_idx
+            try:
+                await bot.send_message(
+                    chat_id=chat_id,
+                    text=chunk,
+                    parse_mode="Markdown",
+                    reply_markup=kb if is_last else None,
+                    disable_notification=silent_push,
+                )
+            except Exception as e:
+                logger.warning(
+                    "Failed to send unified message chunk %d/%d: %s",
+                    i + 1, last_idx + 1, e,
+                )
 
     short = (
         f"checked {len(targets)} | "

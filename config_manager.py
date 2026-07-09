@@ -392,7 +392,10 @@ class ConfigManager:
             base_url=base_url,
             username=server["username"],
             password=server["password"],
-            timeout=ClientTimeout(total=60, connect=10),
+            # total=300 lets oversized executor-table fetches complete (huge PMM
+            # bots with 300k+ rows can take 60-120s + ship hundreds of MB of JSON).
+            # connect stays short so dead servers fail fast.
+            timeout=ClientTimeout(total=300, connect=10),
         )
 
         try:

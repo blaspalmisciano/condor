@@ -190,6 +190,42 @@ async def get_field_options(
         except Exception as e:
             log.warning(f"Failed to fetch controller configs: {e}")
             return {"options": []}
+    if source == "controller_types":
+        # Distinct controller_name values across every config we can see —
+        # live orchestration, controller library, and archived bots.
+        try:
+            from config_manager import get_config_manager
+            cm = get_config_manager()
+            client = await cm.get_client(server)
+            if not client:
+                return {"options": []}
+            names: set[str] = set()
+            try:
+                for c in (await client.controllers.list_controller_configs()) or []:
+                    inner = c.get("config") if isinstance(c.get("config"), dict) else c
+                    n = (inner or {}).get("controller_name")
+                    if n:
+                        names.add(str(n))
+            except Exception as e:
+                log.warning(f"list_controller_configs failed: {e}")
+            # Also probe active bots for their per-bot controller configs — a
+            # newly deployed bot's type won't yet be in the library.
+            try:
+                status = await client.bot_orchestration.get_active_bots_status()
+                for bn in (status.get("data") or {}).keys():
+                    try:
+                        for c in (await client.controllers.get_bot_controller_configs(bn)) or []:
+                            n = c.get("controller_name")
+                            if n:
+                                names.add(str(n))
+                    except Exception:
+                        pass
+            except Exception as e:
+                log.warning(f"get_active_bots_status failed: {e}")
+            return {"options": sorted(names)}
+        except Exception as e:
+            log.warning(f"Failed to fetch controller types: {e}")
+            return {"options": []}
     return {"options": []}
 
 

@@ -114,6 +114,53 @@ window.addEventListener('resize', function() {{
     if (window.Plotly) Plotly.Plots.resize(el);
   }});
 }});
+// Click-to-sort for every table. Parses cell text as number (handles K/M/B
+// suffixes, "1.2K", "-49.05", "45%"), ignores injected <span> wrappers.
+(function() {{
+  function parseNum(s) {{
+    if (!s) return null;
+    var t = String(s).replace(/<[^>]+>/g, '').trim();
+    if (t === '' || t === '—' || t === '-') return null;
+    var m = t.match(/^(-?[\d,]+(?:\.\d+)?)\s*([KMB])?/);
+    if (!m) return null;
+    var v = parseFloat(m[1].replace(/,/g, ''));
+    var suf = (m[2] || '').toUpperCase();
+    if (suf === 'K') v *= 1e3;
+    else if (suf === 'M') v *= 1e6;
+    else if (suf === 'B') v *= 1e9;
+    return v;
+  }}
+  document.querySelectorAll('.section-table table').forEach(function(tbl) {{
+    var ths = tbl.querySelectorAll('thead th');
+    ths.forEach(function(th, idx) {{
+      th.style.cursor = 'pointer';
+      th.style.userSelect = 'none';
+      th.title = 'Click to sort';
+      var state = {{ dir: 0 }};
+      th.addEventListener('click', function() {{
+        var tbody = tbl.querySelector('tbody');
+        var rows = Array.from(tbody.querySelectorAll('tr'));
+        state.dir = state.dir === 1 ? -1 : 1;
+        ths.forEach(function(o) {{
+          o.textContent = o.textContent.replace(/[▲▼]\s*$/, '').trim();
+        }});
+        rows.sort(function(a, b) {{
+          var av = a.children[idx] ? a.children[idx].innerHTML : '';
+          var bv = b.children[idx] ? b.children[idx].innerHTML : '';
+          var na = parseNum(av), nb = parseNum(bv);
+          if (na !== null && nb !== null) return state.dir * (na - nb);
+          if (na !== null) return -1;
+          if (nb !== null) return 1;
+          var sa = av.replace(/<[^>]+>/g, '').trim().toLowerCase();
+          var sb = bv.replace(/<[^>]+>/g, '').trim().toLowerCase();
+          return state.dir * sa.localeCompare(sb);
+        }});
+        rows.forEach(function(r) {{ tbody.appendChild(r); }});
+        th.textContent = th.textContent + (state.dir === 1 ? ' ▲' : ' ▼');
+      }});
+    }});
+  }});
+}})();
 </script>
 </body>
 </html>

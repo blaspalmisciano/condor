@@ -228,7 +228,7 @@ async def _local_manage_routines_run(name: str, config: dict | None, strategy_id
 
     try:
         result = await asyncio.wait_for(
-            routine.run_fn(config_obj, context), timeout=120
+            routine.run_fn(config_obj, context), timeout=600
         )
         # Normalize RoutineResult for JSON serialization (strip binary chart_image)
         from routines.base import normalize_result

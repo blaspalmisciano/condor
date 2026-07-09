@@ -430,7 +430,12 @@ async def post_init(application: Application) -> None:
         BotCommand("gateway", "Gateway for DEX trading"),
         BotCommand("web", "Open the web dashboard"),
     ]
-    await application.bot.set_my_commands(commands)
+    try:
+        await application.bot.set_my_commands(commands)
+    except Exception as e:
+        # Non-fatal: e.g. Telegram flood control (RetryAfter) on restart.
+        # Must not crash startup, or the bot never binds the web port / starts polling.
+        logger.warning(f"Failed to set bot commands: {e}", exc_info=True)
 
     # Admin-only commands (visible only to admin user in their command menu)
     if ADMIN_USER_ID:
