@@ -296,7 +296,7 @@ def register_handlers(application: Application) -> None:
     from handlers.executors import executors_callback_handler, executors_command
     from handlers.memory import memory_callback_handler, memory_command
     from handlers.portfolio import get_portfolio_callback_handler, portfolio_command
-    from handlers.routines import routines_callback_handler, routines_command, stop_command
+    from handlers.routines import routines_callback_handler, routines_command
     from handlers.trading import trade_command as unified_trade_command
     from handlers.trading.router import unified_trade_callback_handler
 
@@ -323,7 +323,6 @@ def register_handlers(application: Application) -> None:
     )  # Alias for /trade
     application.add_handler(CommandHandler("lp", lp_command))
     application.add_handler(CommandHandler("routines", routines_command))
-    application.add_handler(CommandHandler("stop", stop_command))
     application.add_handler(CommandHandler("executors", executors_command))
     application.add_handler(CommandHandler("agent", agent_command))
     # Interrupts the answer in flight without touching the session — the
