@@ -76,11 +76,16 @@ function MultiselectField({
   onChange: (v: unknown) => void;
 }) {
   const { server } = useServer();
-  const { data, isLoading } = useQuery({
+  const { data, isLoading, refetch } = useQuery({
     queryKey: ["routine-field-options", field.options_from, server],
     queryFn: () => api.getRoutineFieldOptions(field.options_from!, server!),
     enabled: !!field.options_from && !!server,
-    staleTime: 30_000,
+    // Don't cache empty results — those are usually transient server-side
+    // errors (unbound-local etc.). Always refetch on mount so opening the
+    // routine config after a fix picks up fresh options immediately.
+    staleTime: 0,
+    refetchOnMount: "always",
+    refetchOnWindowFocus: true,
   });
 
   const options = data?.options ?? [];
@@ -96,8 +101,15 @@ function MultiselectField({
         <div className="text-xs text-[var(--color-text-muted)]">Loading...</div>
       )}
       {!isLoading && options.length === 0 && (
-        <div className="text-xs text-[var(--color-text-muted)]">
-          No options available
+        <div className="flex items-center justify-between text-xs text-[var(--color-text-muted)]">
+          <span>No options available</span>
+          <button
+            type="button"
+            onClick={() => refetch()}
+            className="text-[var(--color-primary)] hover:underline"
+          >
+            Refresh
+          </button>
         </div>
       )}
       {!isLoading && options.length > 0 && (

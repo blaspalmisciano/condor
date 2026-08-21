@@ -59,7 +59,14 @@ class ConfigManager:
         self._clients: Dict[str, Tuple[Any, float]] = (
             {}
         )  # server_name -> (client, connect_time)
-        self._client_ttl = 300  # 5 minutes
+        # Bumped from 300s. Long-running routines (controller_performance
+        # over a big lookback with lots of archived DBs) hold a client
+        # reference for 5-10 min. If the TTL expires mid-run, a concurrent
+        # request refreshes the client and CLOSES the old one — mid-flight
+        # SDK calls then raise `RuntimeError('Client not initialized')` and
+        # every fetch returns []. 1 hour keeps the client alive across the
+        # longest realistic routine run.
+        self._client_ttl = 3600  # 1 hour
         self._client_verify_interval = 60  # seconds between liveness checks
         self._client_locks: Dict[str, asyncio.Lock] = (
             {}
@@ -386,25 +393,26 @@ class ConfigManager:
                 # Fast path: recently verified
                 return client
             elif time.time() - last_verified < self._client_ttl:
-                # Needs liveness check
+                # Needs liveness check. If it fails we DETACH (not close) the
+                # old client — a long-running routine may still be using it
+                # for concurrent SDK calls. Closing here throws
+                # `RuntimeError('Client not initialized')` on those in-flight
+                # calls and every fetch returns []. Leaving the client alive
+                # lets in-flight work finish; aiohttp will GC the session
+                # when the last reference is dropped.
                 try:
-                    await asyncio.wait_for(client.accounts.list_accounts(), timeout=5)
+                    await asyncio.wait_for(client.accounts.list_accounts(), timeout=15)
                     self._clients[name] = (client, time.time())
                     return client
                 except Exception:
                     logger.warning(
-                        f"Stale connection to '{name}' detected, reconnecting"
+                        f"Stale connection to '{name}' detected, reconnecting "
+                        "(old client detached, not closed)"
                     )
-                    try:
-                        await client.close()
-                    except Exception:
-                        pass
                     del self._clients[name]
             else:
-                try:
-                    await client.close()
-                except Exception:
-                    pass
+                # TTL expired — again, detach not close, to avoid killing
+                # in-flight fetches from long routines.
                 del self._clients[name]
 
         # Create new client

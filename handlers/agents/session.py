@@ -9,12 +9,43 @@ from telegram import Bot
 from condor.acp import ACPClient, PermissionCallback, PromptDone, resolve_acp
 from condor.acp.pydantic_ai_client import PydanticAIClient, is_pydantic_ai_model
 from handlers.agents._shared import (
+    DEFAULT_AGENT,
     build_initial_context,
     build_mcp_servers_for_session,
     get_project_dir,
 )
 
 log = logging.getLogger(__name__)
+
+
+def sanitize_agent_key(agent_key: str, user_data: dict | None = None) -> str:
+    """Coerce an unusable agent_key to DEFAULT_AGENT so a bad preference can
+    never brick the /agent assistant.
+
+    Guards against two states that otherwise raise at model-build time and
+    surface to the user as "Failed to start agent session":
+      - malformed provider selection with no model id (e.g. bare "openrouter:")
+      - an "openrouter:*" model when no OPENROUTER_API_KEY is configured
+
+    When a coercion happens and user_data is provided, the stored preference is
+    self-healed so the menu reflects the fallback and the fault doesn't recur.
+    """
+    import os
+
+    bad = None
+    if agent_key.endswith(":"):
+        bad = f"malformed model id {agent_key!r} (no model after prefix)"
+    elif agent_key.startswith("openrouter:") and not os.environ.get("OPENROUTER_API_KEY"):
+        bad = f"{agent_key!r} requires OPENROUTER_API_KEY, which is not set"
+
+    if bad is None:
+        return agent_key
+
+    log.warning("Unusable agent_llm: %s -> falling back to %r", bad, DEFAULT_AGENT)
+    if user_data is not None:
+        user_data["agent_llm"] = DEFAULT_AGENT
+        user_data.pop("agent_llm_auto", None)
+    return DEFAULT_AGENT
 
 # Timeout for acquiring the session lock (seconds).
 # If another prompt is running, we wait this long before giving up.
@@ -127,6 +158,9 @@ async def get_or_create_session(
     When user_id is provided, dynamically configures MCP servers using
     the user's Condor server permissions instead of static .mcp.json.
     """
+    # Never let an unusable stored preference brick the session.
+    agent_key = sanitize_agent_key(agent_key, user_data)
+
     session = _sessions.get(chat_id)
 
     # Reuse existing session if same agent and still alive

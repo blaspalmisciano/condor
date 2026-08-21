@@ -217,7 +217,7 @@ async def run_routine(
 
         with attribute_to(agent):
             result = await asyncio.wait_for(
-                routine.run_fn(config_obj, context), timeout=600
+                routine.run_fn(config_obj, context), timeout=36000
             )
         from routines.base import normalize_result
 

@@ -18,6 +18,8 @@ from condor.web.models import WebUser
 from config_manager import get_config_manager
 
 log = logging.getLogger(__name__)
+_TRADING_PAIRS_CACHE: dict = {}
+_CONTROLLER_TYPES_CACHE: dict = {}
 router = APIRouter(prefix="/routines", tags=["routines"])
 
 
@@ -234,26 +236,103 @@ async def get_field_options(
         except Exception as e:
             log.warning(f"Failed to fetch controller configs: {e}")
             return {"options": []}
+    if source == "trading_pairs":
+        # Distinct trading_pair values across every controller config we can
+        # reach. Combines the library + live-bot configs so archived pairs
+        # (e.g. old USDT-BRL misters) show up alongside currently active ones.
+        #
+        # Robustness: brigado's SDK sometimes hits "Server disconnected" on
+        # a single call; retry up to 3× with backoff. If we still end up with
+        # fewer pairs than the last known good response, return the cached
+        # one so the dropdown never *shrinks* due to transient errors.
+        log.info(f"trading_pairs options requested for server={server!r}")
+        try:
+            cm = get_config_manager()
+            try:
+                client = await cm.get_client(server)
+            except ValueError:
+                log.warning(f"server {server!r} not found; using default")
+                client = await cm.get_client()
+            if not client:
+                log.warning("no client returned; returning []")
+                return {"options": []}
+
+            async def _list_configs():
+                import asyncio as _aio
+                last = None
+                for i in range(3):
+                    try:
+                        return (await client.controllers.list_controller_configs()) or []
+                    except Exception as e:
+                        last = e
+                        await _aio.sleep(0.3 * (i + 1))
+                log.warning(f"list_controller_configs failed after retries: {last}")
+                return []
+
+            pairs: set[str] = set()
+            for c in await _list_configs():
+                inner = c.get("config") if isinstance(c.get("config"), dict) else c
+                p = (inner or {}).get("trading_pair")
+                if p:
+                    pairs.add(str(p).upper())
+            try:
+                status = await client.bot_orchestration.get_active_bots_status()
+                for bn in (status.get("data") or {}).keys():
+                    try:
+                        for c in (await client.controllers.get_bot_controller_configs(bn)) or []:
+                            p = c.get("trading_pair")
+                            if p:
+                                pairs.add(str(p).upper())
+                    except Exception:
+                        pass
+            except Exception as e:
+                log.warning(f"get_active_bots_status failed: {e}")
+
+            # Last-known-good cache: if this response is smaller than the
+            # previous successful one, prefer the cached copy so a transient
+            # disconnect doesn't collapse the dropdown to just active bots.
+            cached = _TRADING_PAIRS_CACHE.get(server, set())
+            if len(pairs) < len(cached):
+                log.warning(
+                    f"trading_pairs shrunk ({len(pairs)} < cached {len(cached)}); using cache"
+                )
+                return {"options": sorted(cached)}
+            _TRADING_PAIRS_CACHE[server] = pairs
+            return {"options": sorted(pairs)}
+        except Exception as e:
+            log.warning(f"Failed to fetch trading pairs: {e}")
+            return {"options": []}
     if source == "controller_types":
         # Distinct controller_name values across every config we can see —
         # live orchestration, controller library, and archived bots.
         try:
-            from config_manager import get_config_manager
             cm = get_config_manager()
-            client = await cm.get_client(server)
+            try:
+                client = await cm.get_client(server)
+            except ValueError:
+                log.warning(f"server {server!r} not found; using default")
+                client = await cm.get_client()
             if not client:
                 return {"options": []}
+
+            async def _list_configs():
+                import asyncio as _aio
+                last = None
+                for i in range(3):
+                    try:
+                        return (await client.controllers.list_controller_configs()) or []
+                    except Exception as e:
+                        last = e
+                        await _aio.sleep(0.3 * (i + 1))
+                log.warning(f"list_controller_configs failed after retries: {last}")
+                return []
+
             names: set[str] = set()
-            try:
-                for c in (await client.controllers.list_controller_configs()) or []:
-                    inner = c.get("config") if isinstance(c.get("config"), dict) else c
-                    n = (inner or {}).get("controller_name")
-                    if n:
-                        names.add(str(n))
-            except Exception as e:
-                log.warning(f"list_controller_configs failed: {e}")
-            # Also probe active bots for their per-bot controller configs — a
-            # newly deployed bot's type won't yet be in the library.
+            for c in await _list_configs():
+                inner = c.get("config") if isinstance(c.get("config"), dict) else c
+                n = (inner or {}).get("controller_name")
+                if n:
+                    names.add(str(n))
             try:
                 status = await client.bot_orchestration.get_active_bots_status()
                 for bn in (status.get("data") or {}).keys():
@@ -266,6 +345,14 @@ async def get_field_options(
                         pass
             except Exception as e:
                 log.warning(f"get_active_bots_status failed: {e}")
+
+            cached = _CONTROLLER_TYPES_CACHE.get(server, set())
+            if len(names) < len(cached):
+                log.warning(
+                    f"controller_types shrunk ({len(names)} < cached {len(cached)}); using cache"
+                )
+                return {"options": sorted(cached)}
+            _CONTROLLER_TYPES_CACHE[server] = names
             return {"options": sorted(names)}
         except Exception as e:
             log.warning(f"Failed to fetch controller types: {e}")

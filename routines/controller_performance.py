@@ -62,7 +62,8 @@ class Config(BaseModel):
     lookback_days: int = Field(default=14, description="Days of history to include (active + stopped controllers)")
     trading_pair: str = Field(
         default="",
-        description="Filter to one pair, e.g. 'BTC-BRL'. Empty = all pairs (candle chart uses the highest-volume pair).",
+        description="Filter to specific trading pairs. Empty = all pairs (candle chart uses the highest-volume pair).",
+        json_schema_extra={"widget": "multiselect", "options_from": "trading_pairs"},
     )
     controllers: str = Field(
         default="",
@@ -89,7 +90,12 @@ class Config(BaseModel):
         description="Maker rebate as a fraction of volume (0.00015 = 0.015%). Added to PnL everywhere.",
     )
     max_dbs: int = Field(
-        default=40, description="Safety cap on how many archived bot databases to scan (most recent first)"
+        default=0,
+        description=(
+            "Safety cap on how many archived bot databases to scan (most recent first). "
+            "0 (default) or negative = no cap — scan every archived DB. Set a non-zero "
+            "value if the SDK is throwing timeouts on very old bots."
+        ),
     )
     max_executors_per_db: int = Field(
         default=0,
@@ -216,7 +222,9 @@ async def _fetch_db_executors(client, db_path: str) -> list[dict]:
     try:
         return _extract_rows(await client.archived_bots.get_database_executors(db_path))
     except Exception as e:
-        logger.debug("get_database_executors(%s) failed: %s", db_path, e)
+        # Was DEBUG — silently ate all fetch errors. WARNING so we see the
+        # actual reason (e.g. "Server disconnected" vs a real 5xx).
+        logger.warning("get_database_executors(%s) failed: %r", db_path, e)
         return []
 
 
@@ -249,7 +257,8 @@ async def gather_executor_events(
             # We just cap the total number of DBs scanned via max_dbs.
             for dts, p in archived:
                 db_paths.append(p)
-            db_paths = db_paths[: config.max_dbs]
+            if config.max_dbs and config.max_dbs > 0:
+                db_paths = db_paths[: config.max_dbs]
         except Exception as e:
             logger.warning("list_databases failed: %s", e)
 
@@ -300,7 +309,9 @@ async def gather_executor_events(
     include = _parse_csv(config.controllers)
     exclude = _parse_csv(config.exclude_controllers)
     types_filter = _parse_csv(config.controller_types)
-    want_pair = config.trading_pair.strip().upper()
+    # trading_pair is now a CSV of upper-cased pairs (multiselect widget).
+    # Empty = no pair filter.
+    want_pairs = {p.upper() for p in _parse_csv(config.trading_pair)}
 
     events: list[dict] = []
     drops: dict[str, int] = defaultdict(int)
@@ -356,7 +367,7 @@ async def gather_executor_events(
             if types_filter and ctype.lower() not in types_filter:
                 drops["other_type"] += 1
                 continue
-            if want_pair and pair and pair != want_pair:
+            if want_pairs and pair and pair.upper() not in want_pairs:
                 drops["other_pair"] += 1
                 continue
             # Capital allocated to this executor: parsed from the per-row
@@ -372,6 +383,19 @@ async def gather_executor_events(
                     cap_row = float(cfg_j.get("total_amount_quote") or 0.0)
                 except (json.JSONDecodeError, ValueError, TypeError):
                     pass
+            price = float(row.get("close_price") or 0.0)
+            if price <= 0:
+                base_amt = float(row.get("filled_amount") or 0.0)
+                quote_amt = float(row.get("filled_amount_quote") or 0.0)
+                if base_amt > 0 and quote_amt > 0:
+                    price = quote_amt / base_amt
+            side_raw = str(row.get("side") or row.get("trade_type") or "").upper()
+            if side_raw in ("1", "BUY", "LONG"):
+                side = "BUY"
+            elif side_raw in ("0", "2", "SELL", "SHORT"):
+                side = "SELL"
+            else:
+                side = side_raw
             events.append({
                 "ts": close_ts,
                 "controller_id": cid,
@@ -381,6 +405,8 @@ async def gather_executor_events(
                 "pnl": float(row.get("net_pnl_quote") or 0.0),
                 "fees": float(row.get("cum_fees_quote") or 0.0),
                 "capital": cap_row,
+                "price": price,
+                "side": side,
             })
     events.sort(key=lambda e: e["ts"])
     # If any fetches failed silently, record that fact in drops so the report
@@ -995,6 +1021,128 @@ def chart_params_for_type(ctype: str, configs: dict[str, dict], perf: dict[str, 
     return fig
 
 
+def chart_candles_orders(candles: list[dict], events: list[dict], pair: str, rebate_rate: float = 0.0):
+    """Candlestick + orders (row 1), cumulative volume (row 2), cumulative PnL+rebates (row 3),
+    all sharing the same x-axis. Scatter markers default to legendonly; subplots are visible."""
+    import plotly.graph_objects as go
+    from plotly.subplots import make_subplots
+
+    if not candles:
+        return None
+    pair_events = [e for e in events if e.get("pair") == pair and e.get("price", 0) > 0]
+    if not pair_events:
+        return None
+
+    fig = make_subplots(
+        rows=3, cols=1, shared_xaxes=True,
+        row_heights=[0.6, 0.2, 0.2], vertical_spacing=0.04,
+        subplot_titles=(f"Candle + Orders — {pair}", "Cumulative Volume", "Cumulative PnL + Rebates"),
+    )
+
+    cx = [_dt(int(c["timestamp"])) for c in candles]
+    fig.add_trace(go.Candlestick(
+        x=cx,
+        open=[c["open"] for c in candles],
+        high=[c["high"] for c in candles],
+        low=[c["low"] for c in candles],
+        close=[c["close"] for c in candles],
+        name="Price",
+        increasing_line_color="#3fb950",
+        decreasing_line_color="#f85149",
+        showlegend=False,
+    ), row=1, col=1)
+
+    by_ctrl: dict[str, list] = defaultdict(list)
+    for e in pair_events:
+        by_ctrl[e["controller_id"]].append(e)
+
+    colors = _colors(list(by_ctrl))
+    for ctrl in sorted(by_ctrl):
+        ctrl_evs = by_ctrl[ctrl]
+        color = colors[ctrl]
+        buys = [e for e in ctrl_evs if e.get("side") == "BUY"]
+        sells = [e for e in ctrl_evs if e.get("side") == "SELL"]
+        others = [e for e in ctrl_evs if e.get("side") not in ("BUY", "SELL")]
+
+        if buys:
+            fig.add_trace(go.Scatter(
+                x=[_dt(int(e["ts"])) for e in buys],
+                y=[e["price"] for e in buys],
+                mode="markers",
+                name=f"{ctrl} ▲buy",
+                marker=dict(symbol="triangle-up", size=8, color=color, line=dict(width=1, color="#0d1117")),
+                visible="legendonly",
+                hovertemplate=f"<b>{ctrl}</b><br>BUY @ %{{y:,.4f}}<br>%{{x}}<extra></extra>",
+            ), row=1, col=1)
+        if sells:
+            fig.add_trace(go.Scatter(
+                x=[_dt(int(e["ts"])) for e in sells],
+                y=[e["price"] for e in sells],
+                mode="markers",
+                name=f"{ctrl} ▼sell",
+                marker=dict(symbol="triangle-down", size=8, color=color, line=dict(width=1, color="#0d1117")),
+                visible="legendonly",
+                hovertemplate=f"<b>{ctrl}</b><br>SELL @ %{{y:,.4f}}<br>%{{x}}<extra></extra>",
+            ), row=1, col=1)
+        if others:
+            fig.add_trace(go.Scatter(
+                x=[_dt(int(e["ts"])) for e in others],
+                y=[e["price"] for e in others],
+                mode="markers",
+                name=ctrl,
+                marker=dict(symbol="circle", size=6, color=color, line=dict(width=1, color="#0d1117")),
+                visible="legendonly",
+                hovertemplate=f"<b>{ctrl}</b><br>@ %{{y:,.4f}}<br>%{{x}}<extra></extra>",
+            ), row=1, col=1)
+
+        # Cumulative volume — step line, one trace per controller
+        cum_v = 0.0
+        xs_v, ys_v = [], []
+        for e in ctrl_evs:
+            cum_v += e["volume"]
+            xs_v.append(_dt(int(e["ts"])))
+            ys_v.append(cum_v)
+        if xs_v:
+            fig.add_trace(go.Scatter(
+                x=xs_v, y=ys_v, name=ctrl, mode="lines",
+                line=dict(width=1.5, color=color, shape="hv"),
+                showlegend=True,
+                hovertemplate=f"<b>{ctrl}</b><br>Cum. Vol: %{{y:,.0f}}<br>%{{x}}<extra></extra>",
+            ), row=2, col=1)
+
+        # Cumulative PnL + rebates, one trace per controller
+        cum_pnl = 0.0
+        xs_p, ys_p = [], []
+        for e in ctrl_evs:
+            cum_pnl += e["pnl"] + e["volume"] * rebate_rate
+            xs_p.append(_dt(int(e["ts"])))
+            ys_p.append(cum_pnl)
+        if xs_p:
+            fig.add_trace(go.Scatter(
+                x=xs_p, y=ys_p, name=ctrl, mode="lines",
+                line=dict(width=1.5, color=color),
+                showlegend=False,
+                hovertemplate=f"<b>{ctrl}</b><br>PnL+Reb: %{{y:,.2f}}<br>%{{x}}<extra></extra>",
+            ), row=3, col=1)
+
+    fig.add_hline(y=0, line_dash="dot", line_color="white", opacity=0.3, row=3, col=1)
+    fig.update_layout(
+        **DARK_LAYOUT,
+        title=f"Candle + Orders by Controller — {pair}",
+        margin=dict(l=50, r=30, t=60, b=30),
+        legend=dict(orientation="v", yanchor="top", y=1, xanchor="left", x=1.01, font=dict(size=9)),
+    )
+    fig.update_xaxes(rangeslider_visible=False, row=1, col=1)
+    fig.update_xaxes(gridcolor="#21262d", row=2, col=1)
+    fig.update_xaxes(gridcolor="#21262d", row=3, col=1)
+    fig.update_yaxes(title_text="Price", gridcolor="#21262d", row=1, col=1)
+    fig.update_yaxes(title_text="Cum. Vol (USDT)", gridcolor="#21262d", row=2, col=1)
+    fig.update_yaxes(title_text="PnL+Reb (USDT)", gridcolor="#21262d", row=3, col=1)
+    for ann in fig.layout.annotations:
+        ann.font = dict(size=11, color="#c9d1d9")
+    return fig
+
+
 # ---------------------------------------------------------------------------
 # Summary table
 # ---------------------------------------------------------------------------
@@ -1176,8 +1324,16 @@ def build_summary(events, live, type_lookup, pair_lookup, rebate_rate, active_id
     SEQ_COLS = {"Capital", "Runs", "Fill %", "Window Vol", "Live Vol"}
     DIV_COLS = {"24h Yield", "Window PnL+Reb", "Live PnL", "Unreal."}
 
-    def _wrap(display: str, color: str) -> str:
-        return f'<span style="background:{color};padding:2px 6px;border-radius:3px;color:#0d1117;font-weight:600;">{display}</span>'
+    # Report table now escapes cell text (upstream security tightening), so we
+    # wrap in Html() to signal this string is pre-built HTML the routine owns
+    # and must be rendered as-is (no escape).
+    from condor.reports import Html as _RawHtml
+
+    def _wrap(display: str, color: str):
+        return _RawHtml(
+            f'<span style="background:{color};padding:2px 6px;border-radius:3px;'
+            f'color:#0d1117;font-weight:600;">{display}</span>'
+        )
 
     for col in SEQ_COLS | DIV_COLS:
         vals = [r.get(f"_r_{col}") for r in rows if r.get(f"_r_{col}") is not None]
@@ -1239,10 +1395,15 @@ async def run(config: Config, context: ContextTypes.DEFAULT_TYPE) -> RoutineResu
     _incl = _parse_csv(config.controllers)
     _excl = _parse_csv(config.exclude_controllers)
     _types = _parse_csv(config.controller_types)
+    _want_pairs_dbg = {p.upper() for p in _parse_csv(config.trading_pair)}
     logger.info(
-        "controller_performance filters: types=%r include=%r exclude=%r (raw types=%r)",
-        _types, _incl, _excl, config.controller_types,
+        "controller_performance filters: pairs=%r types=%r include=%r exclude=%r "
+        "(raw trading_pair=%r raw types=%r)",
+        _want_pairs_dbg, _types, _incl, _excl,
+        config.trading_pair, config.controller_types,
     )
+
+    _want_pairs = {p.upper() for p in _parse_csv(config.trading_pair)}
 
     def _keep_cid(cid: str) -> bool:
         cl = cid.lower()
@@ -1254,9 +1415,13 @@ async def run(config: Config, context: ContextTypes.DEFAULT_TYPE) -> RoutineResu
             ct = (type_lookup.get(cid) or infer_type(cid, None) or "").lower()
             if ct not in _types:
                 return False
+        if _want_pairs:
+            cp = (pair_lookup.get(cid) or infer_pair(cid, None) or "").upper()
+            if cp and cp not in _want_pairs:
+                return False
         return True
 
-    if _incl or _excl or _types:
+    if _incl or _excl or _types or _want_pairs:
         active_ids = {c for c in active_ids if _keep_cid(c)}
         live = {c: v for c, v in live.items() if c in active_ids}
         configs = {c: v for c, v in configs.items() if _keep_cid(c)}
@@ -1279,15 +1444,28 @@ async def run(config: Config, context: ContextTypes.DEFAULT_TYPE) -> RoutineResu
         e["capital"] = e.get("capital", 0.0) * r
     for cid, lv in live.items():
         r = rates.get(_quote_of(pair_lookup.get(cid, "") or infer_pair(cid, None)), 1.0)
-        for k in ("volume_traded", "global_pnl_quote", "realized", "unrealized"):
+        for k in ("volume_traded", "global_pnl_quote", "realized", "unrealized", "capital_quote"):
             if k in lv:
                 lv[k] = float(lv[k]) * r
+    # Config capital (`total_amount_quote`) is in the bot's NATIVE quote (e.g. BRL).
+    # Convert it too so the Capital column — and the 24h-Yield that divides by it —
+    # are in USDT like PnL/Volume, instead of mixing currencies (which understated
+    # yield by the FX rate). Feeds both the summary table and the parameter heatmaps.
+    for cid, cfg in configs.items():
+        if not isinstance(cfg, dict) or cfg.get("total_amount_quote") is None:
+            continue
+        r = rates.get(_quote_of(pair_lookup.get(cid, "") or infer_pair(cid, None)), 1.0)
+        if r != 1.0:
+            try:
+                cfg["total_amount_quote"] = float(cfg["total_amount_quote"]) * r
+            except (TypeError, ValueError):
+                pass
 
     # Per-controller time-series from Volume Drop Alert's snapshot store (real curves
     # for every controller incl. live PMMs). Also drives stall detection below.
     cutoff = time.time() - config.lookback_days * 86400
     snap_series = load_snapshot_series(config.snapshot_state_file, cutoff) if config.snapshot_state_file else {}
-    if _incl or _excl or _types:
+    if _incl or _excl or _types or _want_pairs:
         snap_series = {c: v for c, v in snap_series.items() if _keep_cid(c)}
     for cid, info in snap_series.items():  # convert snapshot curves to USDT too
         r = rates.get(_quote_of(pair_lookup.get(cid, "") or infer_pair(cid, None)), 1.0)
@@ -1329,8 +1507,8 @@ async def run(config: Config, context: ContextTypes.DEFAULT_TYPE) -> RoutineResu
     # Candle pairs: if the user pinned one, we render only that; otherwise we
     # render one Price+PnL chart PER pair that has traded controllers, sorted
     # by 14d volume so the biggest market comes first.
-    if config.trading_pair.strip():
-        candle_pairs = [config.trading_pair.strip().upper()]
+    if _want_pairs:
+        candle_pairs = sorted(_want_pairs)
     else:
         vol_by_pair: dict[str, float] = defaultdict(float)
         for e in events:
@@ -1372,7 +1550,43 @@ async def run(config: Config, context: ContextTypes.DEFAULT_TYPE) -> RoutineResu
     ts_events = build_timeseries(events, config.bucket_hours)
     if snap_series:
         ts_all = build_ts_from_snapshots(snap_series, config.bucket_hours)
-        ts_source = f"live snapshots ({len(snap_series)} controllers)"
+        # VDA only started snapshotting recently, so controllers that stopped
+        # BEFORE VDA existed have no snap entries and would silently disappear
+        # from every chart driven by ts_all (candles+PnL, volume-share). Merge
+        # in event-derived curves for any cid that has closed executors but no
+        # snapshot record.
+        snap_cids = set(ts_all["by_ctrl"])
+        extra_cids = set(ts_events["by_ctrl"]) - snap_cids
+        if extra_cids:
+            # Extend the master bucket list to the union of both sources so
+            # both series line up on the same X axis. Every controller's
+            # cum_vol / cum_pnl dict must contain a value for EVERY bucket in
+            # ts_all["buckets"], otherwise chart_candles_pnl / _cumulative
+            # crash with KeyError. We fill missing buckets by holding the
+            # last known value forward (cumulative values don't decrease when
+            # nothing new happens).
+            all_buckets = sorted(set(ts_all["buckets"]) | set(ts_events["buckets"]))
+            def _fill(d: dict, key: str) -> dict:
+                out = {}
+                last = 0.0
+                for b in all_buckets:
+                    if b in d:
+                        last = d[b]
+                    out[b] = last
+                return out
+            for cid, info in ts_all["by_ctrl"].items():
+                info["cum_vol"] = _fill(info.get("cum_vol", {}), "cum_vol")
+                info["cum_pnl"] = _fill(info.get("cum_pnl", {}), "cum_pnl")
+                info["bucket_vol"] = {b: info.get("bucket_vol", {}).get(b, 0.0) for b in all_buckets}
+            for cid in extra_cids:
+                ev_info = ts_events["by_ctrl"][cid]
+                ts_all["by_ctrl"][cid] = {
+                    "cum_vol": _fill(ev_info.get("cum_vol", {}), "cum_vol"),
+                    "cum_pnl": _fill(ev_info.get("cum_pnl", {}), "cum_pnl"),
+                    "bucket_vol": {b: ev_info.get("bucket_vol", {}).get(b, 0.0) for b in all_buckets},
+                }
+            ts_all["buckets"] = all_buckets
+        ts_source = f"live snapshots ({len(snap_series)}) + event history ({len(extra_cids)})"
     else:
         ts_all = ts_events
         ts_source = "closed executors"
@@ -1483,7 +1697,11 @@ async def run(config: Config, context: ContextTypes.DEFAULT_TYPE) -> RoutineResu
                       if (pair_lookup.get(c) or infer_pair(c, None)) == p_}
             if not p_candles or not p_cids:
                 continue
-            fig = chart_candles_pnl(p_candles, ts_all, p_cids, p_, config.rebate_rate)
+            try:
+                fig = chart_candles_pnl(p_candles, ts_all, p_cids, p_, config.rebate_rate)
+            except Exception as e:
+                logger.warning("chart_candles_pnl(%s) failed: %r", p_, e, exc_info=True)
+                fig = None
             if fig is None:
                 continue
             builder.markdown(
@@ -1496,13 +1714,35 @@ async def run(config: Config, context: ContextTypes.DEFAULT_TYPE) -> RoutineResu
             if fig_candle is None:
                 fig_candle = fig  # kept for Telegram photo fallback below
 
+        for p_ in candle_pairs:
+            p_candles = candles_by_pair.get(p_) or []
+            try:
+                fig_orders = chart_candles_orders(p_candles, events, p_, config.rebate_rate)
+            except Exception as e:
+                logger.warning("chart_candles_orders(%s) failed: %r", p_, e, exc_info=True)
+                fig_orders = None
+            if fig_orders is not None:
+                builder.markdown(
+                    f"### Candle + Orders by Controller — {p_}\n"
+                    "_Each point is a closed executor plotted at its fill price. "
+                    "All controllers start hidden — toggle each on via the legend. "
+                    "▲ = buy side, ▼ = sell side._"
+                )
+                builder.plotly(fig_orders)
+
         # Use events-derived ts (monotonic) for the volume-share and cumulative
         # charts, not snapshot-derived (which resets to 0 on every redeploy).
-        fig_share = chart_volume_share(ts_events, config.bucket_hours)
+        try:
+            fig_share = chart_volume_share(ts_events, config.bucket_hours)
+        except Exception as e:
+            logger.warning("chart_volume_share failed: %r", e, exc_info=True); fig_share = None
         if fig_share is not None:
             builder.markdown("### Volume Share Over Time\n_Each controller's share of traded volume per bucket; line = total volume._")
             builder.plotly(fig_share)
-        fig_cumvol = chart_cumulative_volume(ts_events)
+        try:
+            fig_cumvol = chart_cumulative_volume(ts_events)
+        except Exception as e:
+            logger.warning("chart_cumulative_volume failed: %r", e, exc_info=True); fig_cumvol = None
         if fig_cumvol is not None:
             builder.markdown("### Cumulative Volume per Controller\n_Total throughput each controller has produced, stacked._")
             builder.plotly(fig_cumvol)
@@ -1533,7 +1773,7 @@ async def run(config: Config, context: ContextTypes.DEFAULT_TYPE) -> RoutineResu
             )
         if drops:
             builder.markdown("_Executor rows excluded: " + ", ".join(f"{v} {k.replace('_', ' ')}" for k, v in sorted(drops.items())) + "._")
-        builder.save()
+        await builder.save()
     except Exception as e:
         logger.warning(f"Report generation failed: {e}", exc_info=True)
 

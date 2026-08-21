@@ -170,8 +170,8 @@ window.addEventListener('resize', function() {{
   function parseNum(s) {{
     if (!s) return null;
     var t = String(s).replace(/<[^>]+>/g, '').trim();
-    if (t === '' || t === '—' || t === '-') return null;
-    var m = t.match(/^(-?[\d,]+(?:\.\d+)?)\s*([KMB])?/);
+    if (t === '' || t === '—' || t === '-' || t === '+') return null;
+    var m = t.match(/^([+-]?[\d,]+(?:\.\d+)?)\s*([KMB])?/);
     if (!m) return null;
     var v = parseFloat(m[1].replace(/,/g, ''));
     var suf = (m[2] || '').toUpperCase();
@@ -475,6 +475,13 @@ def _cleanup_locked(max_reports: int = MAX_REPORTS) -> None:
 _SECTION_PRIORITY = {"kpi": 0, "plotly": 1, "table": 2, "markdown": 3}
 
 
+class Html(str):
+    """Marker subclass of str that ReportBuilder table cells render as raw
+    HTML (bypasses html.escape). Use ONLY for HTML the routine itself built
+    — never for anything derived from user input.
+    """
+
+
 class ReportBuilder:
     def __init__(self, title: str = "Report"):
         self._title = title
@@ -653,12 +660,17 @@ class ReportBuilder:
 
     @staticmethod
     def _render_table(columns: list[str], rows: list[dict]) -> str:
+        def _cell(v) -> str:
+            # Routines can wrap a value in Html(...) to inject pre-rendered
+            # HTML (e.g. the controller_performance heatmap spans). Everything
+            # else is escaped to prevent XSS from user-controlled fields.
+            if isinstance(v, Html):
+                return str(v)
+            return html.escape(str(v if v is not None else ""))
         header = "".join(f"<th>{html.escape(str(c))}</th>" for c in columns)
         body_rows = []
         for row in rows:
-            cells = "".join(
-                f"<td>{html.escape(str(row.get(c, '')))}</td>" for c in columns
-            )
+            cells = "".join(f"<td>{_cell(row.get(c, ''))}</td>" for c in columns)
             body_rows.append(f"<tr>{cells}</tr>")
         body = "\n".join(body_rows)
         return f'<div class="section section-table"><table><thead><tr>{header}</tr></thead><tbody>{body}</tbody></table></div>'
