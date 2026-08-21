@@ -9,7 +9,7 @@ import yaml
 from fastapi import APIRouter, Depends, HTTPException
 
 from condor.fetchers.bots import build_bots_page, extract_bots_list
-from condor.web.auth import get_current_user
+from condor.web.auth import require_server_access
 from condor.web.models import (
     AvailableControllersResponse,
     BotDetailResponse,
@@ -22,12 +22,18 @@ from condor.web.models import (
     DeployBotRequest,
     WebUser,
 )
+from condor.web.routes._errors import upstream_error
 from config_manager import get_config_manager
 from handlers.bots._shared import clean_config_for_save
 
 logger = logging.getLogger(__name__)
 
 router = APIRouter(tags=["bots"])
+
+# Per-call budget for the optional enrichment fetches on the bots page. The
+# page renders without them (no age / config / DB perf), so a slow server
+# should cost us those columns, never the whole response.
+ENRICHMENT_TIMEOUT = 15.0
 
 # ── Transitional state store ──
 # Tracks bots/controllers that have been sent a stop command but haven't
@@ -203,11 +209,31 @@ def _extract_perf_snapshots(result: Any) -> list[dict]:
     return []
 
 
+def _collect_bot_runs(result: Any, runs: dict[str, str]) -> None:
+    """Merge a bot-runs API response into ``runs`` (bot_name -> deployed_at)."""
+    if not isinstance(result, dict):
+        return
+    runs_data = result.get("data", result)
+    if isinstance(runs_data, dict):
+        for bot_name, run_info in runs_data.items():
+            if isinstance(run_info, dict):
+                deployed = run_info.get("deployed_at") or run_info.get("created_at")
+                if deployed:
+                    runs[bot_name] = str(deployed)
+            elif isinstance(run_info, str):
+                runs[bot_name] = run_info
+    elif isinstance(runs_data, list):
+        for run in runs_data:
+            if isinstance(run, dict):
+                bn = run.get("bot_name", "")
+                deployed = run.get("deployed_at") or run.get("created_at")
+                if bn and deployed:
+                    runs[bn] = str(deployed)
+
+
 @router.get("/servers/{name}/bots", response_model=BotsPageResponse)
-async def list_bots(name: str, user: WebUser = Depends(get_current_user)):
+async def list_bots(name: str, user: WebUser = Depends(require_server_access)):
     cm = get_config_manager()
-    if not cm.has_server_access(user.id, name):
-        raise HTTPException(status_code=403, detail="No access")
 
     from condor.server_data_service import ServerDataType, get_server_data_service
 
@@ -269,32 +295,46 @@ async def list_bots(name: str, user: WebUser = Depends(get_current_user)):
             return configs_map
 
         async def _fetch_bot_runs() -> dict[str, str]:
+            """Deployed-at timestamps keyed by bot name, for the Age column.
+
+            Filtered to DEPLOYED on purpose: the unfiltered listing also returns
+            ARCHIVED runs, each carrying a multi-KB ``final_status`` blob. On a
+            remote server that is a multi-MB, multi-minute response that stalls
+            the whole page (brigado: 4.5 MB / 274s unfiltered vs 121 KB / 5s
+            filtered), leaving every bot without an age.
+            """
             runs: dict[str, str] = {}
             try:
-                runs_result = await client.bot_orchestration.get_bot_runs()
-                if isinstance(runs_result, dict):
-                    runs_data = runs_result.get("data", runs_result)
-                    if isinstance(runs_data, dict):
-                        for bot_name, run_info in runs_data.items():
-                            if isinstance(run_info, dict):
-                                deployed = run_info.get("deployed_at") or run_info.get(
-                                    "created_at"
-                                )
-                                if deployed:
-                                    runs[bot_name] = str(deployed)
-                            elif isinstance(run_info, str):
-                                runs[bot_name] = run_info
-                    elif isinstance(runs_data, list):
-                        for run in runs_data:
-                            if isinstance(run, dict):
-                                bn = run.get("bot_name", "")
-                                deployed = run.get("deployed_at") or run.get(
-                                    "created_at"
-                                )
-                                if bn and deployed:
-                                    runs[bn] = str(deployed)
+                _collect_bot_runs(
+                    await client.bot_orchestration.get_bot_runs(
+                        deployment_status="DEPLOYED"
+                    ),
+                    runs,
+                )
             except Exception:
-                pass
+                logger.debug("Bot runs not available for '%s'", name)
+
+            # Any active bot the filtered listing missed gets a targeted lookup
+            # (~1 KB each) rather than falling back to the unfiltered listing.
+            missing = [
+                bn
+                for b in bots_list
+                if (bn := b.get("bot_name", "")) and bn not in runs
+            ]
+            if missing:
+
+                async def _get_one_run(bn: str):
+                    try:
+                        _collect_bot_runs(
+                            await client.bot_orchestration.get_bot_runs(
+                                bot_name=bn, limit=1
+                            ),
+                            runs,
+                        )
+                    except Exception:
+                        pass
+
+                await asyncio.gather(*[_get_one_run(bn) for bn in missing])
             return runs
 
         async def _fetch_latest_perf() -> dict[str, dict]:
@@ -315,8 +355,27 @@ async def list_bots(name: str, user: WebUser = Depends(get_current_user)):
                 )
             return perf_map
 
+        async def _with_timeout(coro, label: str, default: Any) -> Any:
+            """Cap one enrichment call so a slow server degrades instead of hanging.
+
+            Each fetcher gets its own budget: one slow endpoint must not cost us
+            the other two.
+            """
+            try:
+                return await asyncio.wait_for(coro, timeout=ENRICHMENT_TIMEOUT)
+            except asyncio.TimeoutError:
+                logger.warning(
+                    "Enrichment '%s' timed out after %.0fs for server '%s'",
+                    label,
+                    ENRICHMENT_TIMEOUT,
+                    name,
+                )
+                return default
+
         ctrl_configs, bot_runs, latest_perf = await asyncio.gather(
-            _fetch_ctrl_configs(), _fetch_bot_runs(), _fetch_latest_perf()
+            _with_timeout(_fetch_ctrl_configs(), "controller configs", {}),
+            _with_timeout(_fetch_bot_runs(), "bot runs", {}),
+            _with_timeout(_fetch_latest_perf(), "latest performance", {}),
         )
 
     page = build_bots_page(
@@ -333,10 +392,10 @@ async def list_bots(name: str, user: WebUser = Depends(get_current_user)):
 
 
 @router.get("/servers/{name}/bots/{bot_id}")
-async def get_bot(name: str, bot_id: str, user: WebUser = Depends(get_current_user)):
+async def get_bot(
+    name: str, bot_id: str, user: WebUser = Depends(require_server_access)
+):
     cm = get_config_manager()
-    if not cm.has_server_access(user.id, name):
-        raise HTTPException(status_code=403, detail="No access")
 
     import asyncio
 
@@ -345,7 +404,8 @@ async def get_bot(name: str, bot_id: str, user: WebUser = Depends(get_current_us
     try:
         result = await client.bot_orchestration.get_bot_status(bot_id)
     except Exception as e:
-        raise HTTPException(status_code=502, detail=str(e))
+        logger.exception("Failed to fetch status for bot '%s' on '%s'", bot_id, name)
+        raise upstream_error("Failed to fetch bot status", e)
 
     if not isinstance(result, dict):
         raise HTTPException(status_code=404, detail="Bot not found")
@@ -386,10 +446,10 @@ async def get_bot(name: str, bot_id: str, user: WebUser = Depends(get_current_us
     "/servers/{name}/controllers/configs",
     response_model=AvailableControllersResponse,
 )
-async def list_controller_configs(name: str, user: WebUser = Depends(get_current_user)):
+async def list_controller_configs(
+    name: str, user: WebUser = Depends(require_server_access)
+):
     cm = get_config_manager()
-    if not cm.has_server_access(user.id, name):
-        raise HTTPException(status_code=403, detail="No access")
 
     import asyncio
 
@@ -441,17 +501,18 @@ async def list_controller_configs(name: str, user: WebUser = Depends(get_current
     response_model=ControllerConfigDetail,
 )
 async def get_controller_config(
-    name: str, config_id: str, user: WebUser = Depends(get_current_user)
+    name: str, config_id: str, user: WebUser = Depends(require_server_access)
 ):
     cm = get_config_manager()
-    if not cm.has_server_access(user.id, name):
-        raise HTTPException(status_code=403, detail="No access")
 
     client = await cm.get_client(name)
     try:
         result = await client.controllers.get_controller_config(config_id)
     except Exception as e:
-        raise HTTPException(status_code=502, detail=str(e))
+        logger.exception(
+            "Failed to fetch controller config '%s' from '%s'", config_id, name
+        )
+        raise upstream_error("Failed to fetch controller config", e)
 
     if not isinstance(result, dict):
         raise HTTPException(status_code=404, detail="Config not found")
@@ -469,7 +530,7 @@ async def update_controller_config(
     name: str,
     config_id: str,
     body: dict[str, Any],
-    user: WebUser = Depends(get_current_user),
+    user: WebUser = Depends(require_server_access),
 ):
     """Update a saved controller config's parameters.
 
@@ -478,8 +539,6 @@ async def update_controller_config(
       - { ... } (raw dict) — existing behavior preserved
     """
     cm = get_config_manager()
-    if not cm.has_server_access(user.id, name):
-        raise HTTPException(status_code=403, detail="No access")
 
     client = await cm.get_client(name)
 
@@ -524,7 +583,10 @@ async def update_controller_config(
     except HTTPException:
         raise
     except Exception as e:
-        raise HTTPException(status_code=502, detail=str(e))
+        logger.exception(
+            "Failed to update controller config '%s' on '%s'", config_id, name
+        )
+        raise upstream_error("Failed to save controller config", e)
 
     return {"updated": True, "config_id": config_id, "result": result}
 
@@ -537,12 +599,10 @@ async def get_controller_source(
     name: str,
     controller_type: str,
     controller_name: str,
-    user: WebUser = Depends(get_current_user),
+    user: WebUser = Depends(require_server_access),
 ):
     """Fetch the Python source of a controller."""
     cm = get_config_manager()
-    if not cm.has_server_access(user.id, name):
-        raise HTTPException(status_code=403, detail="No access")
 
     client = await cm.get_client(name)
     try:
@@ -550,7 +610,13 @@ async def get_controller_source(
             controller_type, controller_name
         )
     except Exception as e:
-        raise HTTPException(status_code=502, detail=str(e))
+        logger.exception(
+            "Failed to fetch controller source '%s/%s' from '%s'",
+            controller_type,
+            controller_name,
+            name,
+        )
+        raise upstream_error("Failed to fetch controller source", e)
 
     if isinstance(result, str):
         source = result
@@ -579,12 +645,10 @@ async def update_controller_source(
     controller_type: str,
     controller_name: str,
     body: dict[str, Any],
-    user: WebUser = Depends(get_current_user),
+    user: WebUser = Depends(require_server_access),
 ):
     """Update the Python source of a controller."""
     cm = get_config_manager()
-    if not cm.has_server_access(user.id, name):
-        raise HTTPException(status_code=403, detail="No access")
 
     source = body.get("source")
     if not source or not isinstance(source, str):
@@ -596,7 +660,13 @@ async def update_controller_source(
             controller_type, controller_name, {"content": source}
         )
     except Exception as e:
-        raise HTTPException(status_code=502, detail=str(e))
+        logger.exception(
+            "Failed to update controller source '%s/%s' on '%s'",
+            controller_type,
+            controller_name,
+            name,
+        )
+        raise upstream_error("Failed to save controller source", e)
 
     return {"updated": True, "result": result}
 
@@ -608,12 +678,10 @@ async def get_controller_config_template(
     name: str,
     controller_type: str,
     controller_name: str,
-    user: WebUser = Depends(get_current_user),
+    user: WebUser = Depends(require_server_access),
 ):
     """Fetch the config template/schema for a controller."""
     cm = get_config_manager()
-    if not cm.has_server_access(user.id, name):
-        raise HTTPException(status_code=403, detail="No access")
 
     client = await cm.get_client(name)
     try:
@@ -621,7 +689,13 @@ async def get_controller_config_template(
             controller_type, controller_name
         )
     except Exception as e:
-        raise HTTPException(status_code=502, detail=str(e))
+        logger.exception(
+            "Failed to fetch config template for '%s/%s' from '%s'",
+            controller_type,
+            controller_name,
+            name,
+        )
+        raise upstream_error("Failed to fetch controller config template", e)
 
     if not result:
         raise HTTPException(status_code=404, detail="Template not found")
@@ -636,12 +710,10 @@ async def get_controller_config_template(
 async def create_controller_config(
     name: str,
     body: dict[str, Any],
-    user: WebUser = Depends(get_current_user),
+    user: WebUser = Depends(require_server_access),
 ):
     """Create or update a controller config."""
     cm = get_config_manager()
-    if not cm.has_server_access(user.id, name):
-        raise HTTPException(status_code=403, detail="No access")
 
     config_id = body.get("id")
     if not config_id:
@@ -670,7 +742,10 @@ async def create_controller_config(
             config_id, clean_body
         )
     except Exception as e:
-        raise HTTPException(status_code=502, detail=str(e))
+        logger.exception(
+            "Failed to create controller config '%s' on '%s'", config_id, name
+        )
+        raise upstream_error("Failed to save controller config", e)
 
     return {"created": True, "config_id": config_id, "result": result}
 
@@ -679,18 +754,19 @@ async def create_controller_config(
 async def delete_controller_config(
     name: str,
     config_id: str,
-    user: WebUser = Depends(get_current_user),
+    user: WebUser = Depends(require_server_access),
 ):
     """Delete a saved controller config."""
     cm = get_config_manager()
-    if not cm.has_server_access(user.id, name):
-        raise HTTPException(status_code=403, detail="No access")
 
     client = await cm.get_client(name)
     try:
         result = await client.controllers.delete_controller_config(config_id)
     except Exception as e:
-        raise HTTPException(status_code=502, detail=str(e))
+        logger.exception(
+            "Failed to delete controller config '%s' from '%s'", config_id, name
+        )
+        raise upstream_error("Failed to delete controller config", e)
 
     return {"deleted": True, "config_id": config_id, "result": result}
 
@@ -700,12 +776,10 @@ async def delete_controller(
     name: str,
     controller_type: str,
     controller_name: str,
-    user: WebUser = Depends(get_current_user),
+    user: WebUser = Depends(require_server_access),
 ):
     """Delete a controller."""
     cm = get_config_manager()
-    if not cm.has_server_access(user.id, name):
-        raise HTTPException(status_code=403, detail="No access")
 
     client = await cm.get_client(name)
     try:
@@ -713,7 +787,13 @@ async def delete_controller(
             controller_type, controller_name
         )
     except Exception as e:
-        raise HTTPException(status_code=502, detail=str(e))
+        logger.exception(
+            "Failed to delete controller '%s/%s' from '%s'",
+            controller_type,
+            controller_name,
+            name,
+        )
+        raise upstream_error("Failed to delete controller", e)
 
     return {
         "deleted": True,
@@ -725,11 +805,9 @@ async def delete_controller(
 
 @router.post("/servers/{name}/bots/deploy")
 async def deploy_bot_endpoint(
-    name: str, body: DeployBotRequest, user: WebUser = Depends(get_current_user)
+    name: str, body: DeployBotRequest, user: WebUser = Depends(require_server_access)
 ):
     cm = get_config_manager()
-    if not cm.has_server_access(user.id, name):
-        raise HTTPException(status_code=403, detail="No access")
 
     client = await cm.get_client(name)
 
@@ -746,18 +824,17 @@ async def deploy_bot_endpoint(
             max_controller_drawdown_quote=body.max_controller_drawdown_quote,
         )
     except Exception as e:
-        raise HTTPException(status_code=502, detail=str(e))
+        logger.exception("Failed to deploy bot '%s' on '%s'", body.bot_name, name)
+        raise upstream_error("Failed to deploy bot", e)
 
     return result
 
 
 @router.post("/servers/{name}/bots/{bot_name}/stop")
 async def stop_bot_endpoint(
-    name: str, bot_name: str, user: WebUser = Depends(get_current_user)
+    name: str, bot_name: str, user: WebUser = Depends(require_server_access)
 ):
     cm = get_config_manager()
-    if not cm.has_server_access(user.id, name):
-        raise HTTPException(status_code=403, detail="No access")
 
     # Mark as stopping immediately so UI reflects it
     mark_bot_stopping(name, bot_name)
@@ -774,7 +851,8 @@ async def stop_bot_endpoint(
         )
     except Exception as e:
         clear_bot_stopping(name, bot_name)
-        raise HTTPException(status_code=502, detail=str(e))
+        logger.exception("Failed to stop bot '%s' on '%s'", bot_name, name)
+        raise upstream_error("Failed to stop bot", e)
 
     return result
 
@@ -784,11 +862,9 @@ async def stop_controllers_endpoint(
     name: str,
     bot_name: str,
     body: ControllerActionRequest,
-    user: WebUser = Depends(get_current_user),
+    user: WebUser = Depends(require_server_access),
 ):
     cm = get_config_manager()
-    if not cm.has_server_access(user.id, name):
-        raise HTTPException(status_code=403, detail="No access")
 
     # Mark controllers as stopping immediately
     mark_controllers_stopping(name, bot_name, body.controller_names)
@@ -805,7 +881,10 @@ async def stop_controllers_endpoint(
             controller_names=body.controller_names,
         )
     except Exception as e:
-        raise HTTPException(status_code=502, detail=str(e))
+        logger.exception(
+            "Failed to stop controllers on bot '%s' of '%s'", bot_name, name
+        )
+        raise upstream_error("Failed to stop controllers", e)
 
     return result
 
@@ -815,11 +894,9 @@ async def start_controllers_endpoint(
     name: str,
     bot_name: str,
     body: ControllerActionRequest,
-    user: WebUser = Depends(get_current_user),
+    user: WebUser = Depends(require_server_access),
 ):
     cm = get_config_manager()
-    if not cm.has_server_access(user.id, name):
-        raise HTTPException(status_code=403, detail="No access")
 
     client = await cm.get_client(name)
 
@@ -833,7 +910,10 @@ async def start_controllers_endpoint(
             controller_names=body.controller_names,
         )
     except Exception as e:
-        raise HTTPException(status_code=502, detail=str(e))
+        logger.exception(
+            "Failed to start controllers on bot '%s' of '%s'", bot_name, name
+        )
+        raise upstream_error("Failed to start controllers", e)
 
     return result
 
@@ -844,12 +924,10 @@ async def update_bot_controller_config_endpoint(
     bot_name: str,
     config_id: str,
     body: dict[str, Any],
-    user: WebUser = Depends(get_current_user),
+    user: WebUser = Depends(require_server_access),
 ):
     """Update a controller config inside a running bot in real-time."""
     cm = get_config_manager()
-    if not cm.has_server_access(user.id, name):
-        raise HTTPException(status_code=403, detail="No access")
 
     client = await cm.get_client(name)
 
@@ -874,7 +952,13 @@ async def update_bot_controller_config_endpoint(
     except HTTPException:
         raise
     except Exception as e:
-        raise HTTPException(status_code=502, detail=str(e))
+        logger.exception(
+            "Failed to update controller config '%s' on bot '%s' of '%s'",
+            config_id,
+            bot_name,
+            name,
+        )
+        raise upstream_error("Failed to save controller config", e)
 
     return {
         "updated": True,

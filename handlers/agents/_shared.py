@@ -1,107 +1,32 @@
 """Constants and MCP config loader for agent sessions."""
 
+import hashlib
+import json
 import logging
+import os
 from pathlib import Path
 from typing import Any
 
+from condor.acp.client import bot_process_marker
+from condor.memory.paths import CHAT_SLUG
+
 log = logging.getLogger(__name__)
 
-# -- Assistant prompt loader (auto-discovery from assistants/ folder) --
 
-_ASSISTANTS_DIR = Path(__file__).parent.parent.parent / "assistants"
-_assistant_cache: dict[str, tuple[dict[str, str], str]] = {}
+def _chat_agent():
+    """The default agent's record — Condor's ``agents/condor/AGENT.md``.
 
-
-def _parse_assistant(path: Path) -> tuple[dict[str, str], str]:
-    """Parse an assistant .md file, extracting YAML frontmatter and body.
-
-    Frontmatter format (between --- lines):
-        label: Display Name
-        description: Short description
-
-    Returns (metadata_dict, body_text).
+    There is one loader and one frontmatter schema (FEAT-033): the chat is read
+    by ``AgentStore`` exactly like a specialist is. Returns ``None`` only if the
+    file is missing or unreadable, which callers treat as "no instructions"
+    rather than as a startup failure.
     """
-    raw = path.read_text(encoding="utf-8").strip()
-    meta: dict[str, str] = {}
-    body = raw
+    from condor.agents.agent import AgentStore
 
-    if raw.startswith("---"):
-        parts = raw.split("---", 2)
-        if len(parts) >= 3:
-            for line in parts[1].strip().splitlines():
-                if ":" in line:
-                    k, v = line.split(":", 1)
-                    meta[k.strip()] = v.strip()
-            body = parts[2].strip()
-
-    # Fallback: derive label from filename
-    if "label" not in meta:
-        meta["label"] = path.stem.replace("_", " ").title()
-    if "description" not in meta:
-        meta["description"] = ""
-
-    return meta, body
+    return AgentStore().get(CHAT_SLUG)
 
 
-def load_assistant(name: str) -> str:
-    """Load an assistant prompt body from assistants/{name}.md. Cached."""
-    meta, body = _load_assistant_full(name)
-    return body
-
-
-def _assistant_path(name: str) -> Path | None:
-    """Resolve an assistant's definition file.
-
-    Supports both the flat form (``assistants/{name}.md``) and the folder form
-    (``assistants/{name}/AGENT.md``, FEAT-003), where the assistant's store is
-    co-located under ``assistants/{name}/store/``. Flat form wins if both exist.
-    """
-    flat = _ASSISTANTS_DIR / f"{name}.md"
-    if flat.exists():
-        return flat
-    folder = _ASSISTANTS_DIR / name / "AGENT.md"
-    if folder.exists():
-        return folder
-    return None
-
-
-def _load_assistant_full(name: str) -> tuple[dict[str, str], str]:
-    """Load metadata + body for an assistant. Cached after first read."""
-    if name in _assistant_cache:
-        return _assistant_cache[name]
-    path = _assistant_path(name)
-    if path is None:
-        log.warning("Assistant prompt not found: %s", _ASSISTANTS_DIR / name)
-        return {"label": name, "description": ""}, ""
-    result = _parse_assistant(path)
-    _assistant_cache[name] = result
-    return result
-
-
-def discover_assistants() -> dict[str, dict[str, str]]:
-    """Auto-discover all assistants from ``assistants/``.
-
-    Picks up both ``assistants/{name}.md`` (flat) and ``assistants/{name}/AGENT.md``
-    (folder form, FEAT-003). Returns dict like:
-    {"condor": {"label": "Condor", "description": "..."}, ...}
-    """
-    result: dict[str, dict[str, str]] = {}
-    if not _ASSISTANTS_DIR.exists():
-        return result
-    # Flat form: assistants/{name}.md
-    names = [path.stem for path in sorted(_ASSISTANTS_DIR.glob("*.md"))]
-    # Folder form (FEAT-003): assistants/{name}/AGENT.md
-    names += [path.parent.name for path in sorted(_ASSISTANTS_DIR.glob("*/AGENT.md"))]
-    for name in dict.fromkeys(names):  # dedupe, preserve order
-        meta, _ = _load_assistant_full(name)
-        result[name] = {
-            "label": meta["label"],
-            "description": meta.get("description", ""),
-        }
-    return result
-
-
-AGENT_OPTIONS: dict[str, dict[str, str]] = {
+AGENT_OPTIONS: dict[str, dict[str, Any]] = {
     "claude-code": {"label": "Claude Code"},
     "claude-acp:opus": {"label": "Claude (ACP) — Opus"},
     "claude-acp:sonnet": {"label": "Claude (ACP) — Sonnet"},
@@ -110,16 +35,167 @@ AGENT_OPTIONS: dict[str, dict[str, str]] = {
     "codex": {"label": "ChatGPT Codex"},
     "ollama:": {"label": "Ollama — Default Model"},
     "lmstudio:": {"label": "LM Studio — Default Model"},
-    # Sentinel — clicking this opens the OpenRouter model picker (handlers/agents/menu.py).
-    # The actual stored agent_llm becomes "openrouter:<slug>" once the user picks a model.
-    "openrouter:": {"label": "OpenRouter — Pick Model"},
+    # Sentinels — these open a picker instead of being a selectable model, so
+    # they are NOT valid agent keys. `picker` marks them for surfaces that
+    # render AGENT_OPTIONS as a flat list of choices (the web dashboard's model
+    # dropdown), which would otherwise offer a key that fails at session start.
+    #
+    # OpenRouter: stored agent_llm becomes "openrouter:<slug>".
+    "openrouter:": {"label": "OpenRouter — Pick Model", "picker": True},
+    # Custom endpoints: the user's saved OpenAI-compatible endpoints live in
+    # preferences (condor/preferences.py, shared with the web dashboard) and
+    # the stored agent_llm becomes "custom@<endpoint>:<model-id>".
+    "custom:": {"label": "Custom — OpenAI-compatible API", "picker": True},
 }
+
+
+# What a fresh install should pick unless it has a reason not to: the ACP bridge
+# is the best-supported path, and Sonnet is the balance of capability and cost
+# most users want. Surfaces that rank the catalog (the `make pick-model` wizard)
+# float this key to the top and mark it; it is deliberately NOT part of the
+# `label`, which is reused as a plain display name all over the bot.
+RECOMMENDED_AGENT = "claude-acp:sonnet"
+
+
+def selectable_agent_options() -> dict[str, dict[str, Any]]:
+    """AGENT_OPTIONS minus the picker sentinels — every key here is startable."""
+    return {k: v for k, v in AGENT_OPTIONS.items() if not v.get("picker")}
+
+
+def bind_chat_to_agent(user_data: dict | None, agent_slug: str) -> None:
+    """Record (or clear) the specialist this chat talks to.
+
+    Written by the "Talk to" picker and read by every path that spawns a session
+    for the chat, which is what makes the choice outlive the subprocess that
+    served it (CORR-090). An empty slug means Condor was picked, i.e. unbound.
+
+    Only the slug field is written. Unbinding is a change of interlocutor, not
+    the end of the chat: the conversation stored beside it (ARCH-101) has to
+    survive picking the coordinator, so this must never drop the whole record.
+    """
+    from condor.preferences import set_chat_binding
+
+    if user_data is None:
+        return
+    set_chat_binding(user_data, {"agent_slug": agent_slug})
+
+
+def stale_binding_notice(slug: str) -> str:
+    """Told once, when a bound Agent's directory is gone by the time we respawn."""
+    return (
+        f"The agent '{slug}' no longer exists, so this chat is back to Condor. "
+        "Use /agent → Talk to if you want to bind it to another one."
+    )
+
+
+def resolve_chat_binding(user_data: dict | None, drop_stale: bool = True):
+    """The Agent this chat is bound to, as ``(agent, stale_slug)``.
+
+    ``agent`` is ``None`` when the chat is unbound (Condor answers) or when the
+    binding could not be honoured. In that second case ``stale_slug`` names the
+    agent that went missing — its directory was deleted while the chat was bound
+    to it. Silently falling back to the coordinator is the bug this exists to
+    prevent: it swaps the identity, the toolset, the pinned server and the
+    memory scope with nothing on screen to show for it.
+
+    ``drop_stale`` forgets such a binding, so the notice is delivered exactly
+    once and every later respawn is cleanly unbound. Only the paths that spawn a
+    session pass it: a surface that merely *renders* the binding must not be the
+    one to consume the warning the next spawn owes the user.
+    """
+    from condor.agents.agent import AgentStore
+    from condor.preferences import get_chat_binding
+
+    if user_data is None:
+        return None, ""
+
+    slug = get_chat_binding(user_data).get("agent_slug") or ""
+    if not slug:
+        return None, ""
+
+    agent = AgentStore().get(slug)
+    if agent is None:
+        log.warning("Chat is bound to unknown agent %r", slug)
+        if drop_stale:
+            # The agent is gone; the chat and its transcript are not. Clearing
+            # the slug alone leaves the conversation to be resumed by Condor.
+            bind_chat_to_agent(user_data, "")
+        return None, slug
+
+    return agent, ""
+
+
+def remember_chat_conversation(user_data: dict | None, conversation_id: str) -> None:
+    """Record the conversation this chat is now in, for the next respawn.
+
+    The id lives on the in-memory session and nowhere else, so a chat that lost
+    its subprocess had no way to say which transcript it belonged to and every
+    respawn started blank (ARCH-101). Written after every successful spawn —
+    including the ones that deliberately minted a fresh conversation, since that
+    new one is what the chat is in from then on.
+
+    An empty id is not recorded: it means the runtime could not resolve a
+    conversation at all (a session with no owner, or a recording failure), which
+    is no reason to forget the one the chat already had.
+    """
+    from condor.preferences import set_chat_binding
+
+    if user_data is None or not conversation_id:
+        return
+    set_chat_binding(user_data, {"conversation_id": conversation_id})
+
+
+def forget_chat_conversation(user_data: dict | None) -> None:
+    """Start the chat's next spawn on a fresh conversation.
+
+    The deliberate new-chat verbs — "New session" and the ``-`` reset — call
+    this. The agent binding is untouched: a new chat is a new transcript, not a
+    demotion to the coordinator.
+    """
+    from condor.preferences import set_chat_binding
+
+    if user_data is None:
+        return
+    set_chat_binding(user_data, {"conversation_id": ""})
+
+
+def stored_chat_conversation(user_data: dict | None) -> str:
+    """The conversation this chat should come back to, or "" for a fresh one."""
+    from condor.preferences import get_chat_binding
+
+    if user_data is None:
+        return ""
+    return get_chat_binding(user_data).get("conversation_id") or ""
+
+
+def conversation_token(conversation_id: str) -> str:
+    """Short stable token for a conversation id, for use in callback_data.
+
+    Telegram caps callback_data at 64 bytes. Conversation ids are only bounded
+    by what the store accepts as a path segment, so the picker addresses them by
+    a fixed-width digest instead of by the id itself — the payload is the same
+    size whoever minted the id. It is deliberately not a list position either:
+    the list is shared with the dashboard and reorders on every write (it is
+    sorted by ``updated_at``), so an index rendered a minute ago can resolve to
+    somebody else's conversation by the time it is tapped (CORR-097).
+    """
+    return hashlib.blake2s(conversation_id.encode("utf-8"), digest_size=4).hexdigest()
+
+
+def find_conversation(metas: list, token: str):
+    """Resolve a token from :func:`conversation_token` against a fresh listing.
+
+    ``None`` means the conversation is no longer there — deleted from the
+    dashboard, or from another chat, between the render and the tap. Callers
+    must treat that as a normal outcome and say so rather than failing.
+    """
+    return next((m for m in metas if conversation_token(m.id) == token), None)
 
 
 def _default_agent() -> str:
     """Resolve the fallback agent_key for users who haven't picked a model.
 
-    Precedence: ``CONDOR_DEFAULT_AGENT`` env > condor ``AGENT.md`` frontmatter
+    Precedence: ``CONDOR_DEFAULT_AGENT`` env > Condor's ``AGENT.md`` frontmatter
     ``agent_key`` > ``"claude-code"``. A user's own /agent → Change LLM choice
     (``agent_llm``) still overrides this at runtime; this is only the default.
     Examples for the frontmatter / env: ``claude-code``, ``claude-acp:opus``,
@@ -127,37 +203,15 @@ def _default_agent() -> str:
     """
     import os
 
-    meta, _ = _load_assistant_full("condor")
+    agent = _chat_agent()
     return (
-        os.environ.get("CONDOR_DEFAULT_AGENT") or meta.get("agent_key") or "claude-code"
+        os.environ.get("CONDOR_DEFAULT_AGENT")
+        or (agent.agent_key if agent else "")
+        or "claude-code"
     )
 
 
 DEFAULT_AGENT = _default_agent()
-
-# -- Agent modes (auto-discovered) --
-
-AGENT_MODES = discover_assistants()
-DEFAULT_MODE = "condor"
-
-
-def normalize_mode(mode: str | None) -> str:
-    """Coerce a persisted ``agent_mode`` to a currently-valid one.
-
-    FEAT-004 collapsed the old multi-mode setup ('trading'/'agent_builder') into
-    the single 'condor' mode. Stale pickled ``user_data`` may still hold a mode
-    that is no longer in ``AGENT_MODES``; left as-is it would surface a raw broken
-    label or start a non-existent mode. Anything unknown falls back to
-    ``DEFAULT_MODE``.
-    """
-    return mode if mode in AGENT_MODES else DEFAULT_MODE
-
-
-def reload_assistants() -> None:
-    """Re-scan assistants/ folder. Call after adding/removing .md files."""
-    _assistant_cache.clear()
-    AGENT_MODES.clear()
-    AGENT_MODES.update(discover_assistants())
 
 
 # -- Compact prompt templates --
@@ -192,6 +246,19 @@ _WEB_FORMATTING = (
     "- No message length limits, but stay concise.\n"
     "- Use tables for structured data (portfolios, prices, comparisons).\n"
     "- Use code blocks for configs, JSON, or commands.\n"
+    "- CHARTS: when the answer is a numeric series or comparison (a price or\n"
+    "  PnL curve, volume per venue, a distribution), draw it with a ```chart\n"
+    "  fence holding one JSON object. The dashboard renders it as an\n"
+    "  interactive chart:\n"
+    "  ```chart\n"
+    '  {"type": "line", "title": "SOL/USDC 24h", "x": "time",\n'
+    '   "series": [{"key": "price", "name": "Price"}],\n'
+    '   "data": [{"time": "12:00", "price": 150.1}, {"time": "16:00", "price": 152.4}]}\n'
+    "  ```\n"
+    '  "type" is "line", "area" or "bar"; "x" and every series "key" name\n'
+    "  fields of the data rows. Max 4 series and 200 points (downsample longer\n"
+    '  series). A series may set "color": "up", "down", "yellow" or a hex.\n'
+    "  Chart for the shape, table for exact values; use both when both matter.\n"
     "- Respond in the user's language."
 )
 
@@ -204,14 +271,24 @@ _TELEGRAM_FORMATTING = (
 )
 
 
+def platform_formatting(platform: str = "telegram") -> str:
+    """The reply-formatting rules for a platform.
+
+    Public because a bound Agent opens the chat with its own identity context
+    instead of :func:`build_initial_context`, and would otherwise be the only
+    brain in the product that never hears how the surface it is speaking into
+    renders a reply.
+    """
+    return _WEB_FORMATTING if platform == "web" else _TELEGRAM_FORMATTING
+
+
 def _build_system_prompt(platform: str = "telegram") -> str:
-    """Build the system prompt by combining the assistant .md with platform formatting rules."""
-    assistant_content = load_assistant("condor")
-    formatting = _WEB_FORMATTING if platform == "web" else _TELEGRAM_FORMATTING
+    """Condor's own AGENT.md plus the platform's formatting rules."""
+    agent = _chat_agent()
     return (
         "[System context -- do not repeat this to the user]\n\n"
-        f"{assistant_content}\n\n"
-        f"{formatting}"
+        f"{agent.instructions if agent else ''}\n\n"
+        f"{platform_formatting(platform)}"
     )
 
 
@@ -228,6 +305,18 @@ BLOCKED_TOOLS: set[str] = set()
 # Actions within manage_executors that require confirmation
 DANGEROUS_EXECUTOR_ACTIONS = {"create", "stop"}
 
+# Actions within manage_bots that deploy/mutate a live bot (status/logs/get_config
+# are read-only and excluded). manage_controllers itself is excluded entirely — it
+# only writes controller templates/saved configs, never a running bot (see its own
+# tool docstring: "Does NOT affect running bots").
+DANGEROUS_BOT_ACTIONS = {
+    "deploy",
+    "stop_bot",
+    "stop_controllers",
+    "start_controllers",
+    "update_config",
+}
+
 # Actions within manage_gateway_swaps that require confirmation
 DANGEROUS_SWAP_ACTIONS = {"execute"}
 
@@ -235,33 +324,85 @@ DANGEROUS_SWAP_ACTIONS = {"execute"}
 DANGEROUS_CLMM_ACTIONS = {"open_position", "close_position"}
 
 
+def tool_call_name(tool_call: dict[str, Any]) -> str:
+    """The bare tool name, with any MCP prefix stripped.
+
+    ACP names a tool by its wire name (``mcp__mcp-hummingbot__manage_bots``)
+    where the local surfaces use the bare one, so everything that dispatches on
+    a tool name — the danger list, the risk gate, the confirmation summary —
+    has to normalize identically or they disagree about the same call.
+    """
+    raw_name = tool_call.get("tool", "") or tool_call.get("title", "")
+    return raw_name.rsplit("__", 1)[-1] if "__" in raw_name else raw_name
+
+
+def tool_call_input(tool_call: dict[str, Any]) -> dict[str, Any] | None:
+    """A tool call's arguments as a mapping, or ``None`` when unreadable.
+
+    ``None`` means "I cannot tell what this call does", and every caller has to
+    fail closed on it: an action-gated tool whose action can't be read is
+    treated as dangerous rather than waved through (SEC-093). Callers must not
+    reach for other spellings of the arguments — the ACP wire's ``rawInput`` is
+    translated once, at the boundary in :func:`condor.acp.client.normalize_tool_call`.
+
+    A JSON string is parsed: OpenAI-compatible providers deliver tool arguments
+    that way.
+    """
+    args = tool_call.get("input")
+    if isinstance(args, dict):
+        return args
+    if isinstance(args, str) and args.strip():
+        try:
+            parsed = json.loads(args)
+        except json.JSONDecodeError:
+            return None
+        return parsed if isinstance(parsed, dict) else None
+    return None
+
+
+def _has_dangerous_action(
+    tool_call: dict[str, Any], dangerous_actions: set[str]
+) -> bool:
+    """Whether an action-gated tool call selects one of its dangerous actions.
+
+    Fails closed (SEC-093): unreadable arguments, or a missing/non-string
+    ``action``, count as dangerous. ``action`` is required by every one of
+    these tools, so an unreadable one is never a benign read — it is a call we
+    failed to understand, and those belong in front of a human.
+    """
+    input_data = tool_call_input(tool_call)
+    if input_data is None:
+        return True
+    action = input_data.get("action")
+    if not isinstance(action, str) or not action:
+        return True
+    return action in dangerous_actions
+
+
 def is_dangerous_tool_call(tool_call: dict[str, Any]) -> bool:
     """Check if a tool call requires user confirmation."""
-    raw_name = tool_call.get("tool", "") or tool_call.get("title", "")
-    # Normalize MCP-prefixed names (e.g. mcp__mcp-hummingbot__manage_executors → manage_executors)
-    tool_name = raw_name.rsplit("__", 1)[-1] if "__" in raw_name else raw_name
+    tool_name = tool_call_name(tool_call)
 
     # Direct dangerous tools
     if tool_name in DANGEROUS_TOOLS:
         # For manage_gateway_swaps, only "execute" action is dangerous
         if tool_name == "manage_gateway_swaps":
-            input_data = tool_call.get("input", {})
-            action = input_data.get("action", "")
-            return action in DANGEROUS_SWAP_ACTIONS
+            return _has_dangerous_action(tool_call, DANGEROUS_SWAP_ACTIONS)
 
         # For manage_gateway_clmm, only open/close are dangerous
         if tool_name == "manage_gateway_clmm":
-            input_data = tool_call.get("input", {})
-            action = input_data.get("action", "")
-            return action in DANGEROUS_CLMM_ACTIONS
+            return _has_dangerous_action(tool_call, DANGEROUS_CLMM_ACTIONS)
 
         return True
 
     # manage_executors with create/stop actions
     if tool_name == "manage_executors":
-        input_data = tool_call.get("input", {})
-        action = input_data.get("action", "")
-        return action in DANGEROUS_EXECUTOR_ACTIONS
+        return _has_dangerous_action(tool_call, DANGEROUS_EXECUTOR_ACTIONS)
+
+    # manage_bots with deploy/stop/update actions (a bot deploy places real
+    # capital via a controller, a different path than manage_executors)
+    if tool_name == "manage_bots":
+        return _has_dangerous_action(tool_call, DANGEROUS_BOT_ACTIONS)
 
     return False
 
@@ -275,15 +416,68 @@ def get_project_dir() -> str:
     return str(Path(__file__).parent.parent.parent)
 
 
+def _bot_token() -> str:
+    """This bot's Telegram token, read at call time.
+
+    Goes through ``utils.config`` for its ``load_dotenv()`` side effect, so the
+    marker built here is derived from the same token ``main.py`` hands the
+    reaper — a mismatch would silently strand orphaned subprocess trees.
+    """
+    import utils.config  # noqa: F401  (imported for load_dotenv())
+
+    return os.environ.get("TELEGRAM_TOKEN", "")
+
+
+def _bot_id_args() -> list[str]:
+    """``--bot-id <digest>`` for an MCP subprocess, or nothing without a token.
+
+    The digest is what the startup reaper (``reap_stale_acp_trees``) seeds on to
+    find subprocess trees orphaned by a previous crash. It replaced the raw
+    token, which used to sit here in clear text (SEC-095). Both MCP servers
+    parse their argv with ``parse_known_args``, so the flag is inert to them —
+    it exists purely to be visible in ``ps``.
+    """
+    marker = bot_process_marker(_bot_token())
+    return ["--bot-id", marker] if marker else []
+
+
+def _env_entries(**values: Any) -> list[dict[str, str]]:
+    """ACP ``env`` entries (``{"name", "value"}``), skipping empty values.
+
+    This is the channel every secret an MCP subprocess needs must travel on: the
+    ACP bridge and the pydantic-ai stdio client both overlay these onto the
+    child's inherited environment, which — unlike argv — no other local user can
+    read out of ``ps``.
+
+    Values are coerced to ``str``: YAML loads an unquoted numeric credential as
+    int (e.g. ``password: 123``), and an int in the environment mapping breaks
+    subprocess spawning — for pydantic-ai backends (lmstudio:/ollama:/
+    openrouter:) it surfaces as a StdioServerParameters validation error.
+    """
+    entries = (
+        (name, str(value)) for name, value in values.items() if value is not None
+    )
+    return [{"name": name, "value": value} for name, value in entries if value]
+
+
 def _condor_mcp_args(
     chat_id: int | str,
     user_id: int,
     agent_slug: str | None = None,
     server_name: str | None = None,
+    delegate_worker: bool = False,
 ) -> list[str]:
-    """Build CLI args for the condor MCP subprocess."""
-    import os
+    """Build CLI args for the condor MCP subprocess.
 
+    ``delegate_worker`` marks a *background Condor worker* — the detached session
+    ``delegate`` starts (FEAT-032). The chat and that worker share one agent
+    record, so the flag is what tells the subprocess which seat it is sitting in.
+
+    The bot token travels in the server's ``env``, never here: argv is
+    world-readable via ``ps`` (SEC-095). What argv carries instead is
+    ``--bot-id``, the token's non-secret digest, which is how the startup reaper
+    recognizes our own leaked subprocess trees.
+    """
     # MCP server expects int chat_id. For web sessions (string keys like "web_42"),
     # use user_id instead — in Telegram DMs, chat_id == user_id anyway.
     effective_chat_id = chat_id if isinstance(chat_id, int) else user_id
@@ -292,40 +486,95 @@ def _condor_mcp_args(
         str(effective_chat_id),
         "--user-id",
         str(user_id),
-        "--bot-token",
-        os.environ.get("TELEGRAM_TOKEN", ""),
     ]
+    args.extend(_bot_id_args())
     if agent_slug:
-        args.extend(["--agent-slug", agent_slug])
+        args.extend(["--agent-slug", str(agent_slug)])
     if server_name:
-        args.extend(["--server-name", server_name])
+        args.extend(["--server-name", str(server_name)])
+    if delegate_worker:
+        args.append("--delegate-worker")
     return args
+
+
+def _hummingbot_mcp_args(server: dict[str, Any], server_name: str) -> list[str]:
+    """Build CLI args for the hummingbot MCP subprocess.
+
+    Only non-secret coordinates travel here — the API username/password go in
+    the server's ``env`` instead, since argv is world-readable via ``ps``
+    (SEC-095). Every element is a string: YAML loads unquoted numerics as int
+    (e.g. ``port: 8000``), and pydantic-ai's StdioServerParameters rejects
+    non-string args when starting LM Studio / other local-model sessions.
+    """
+    api_url = f"http://{server['host']}:{server['port']}"
+    return [
+        "run",
+        "python",
+        "-m",
+        "mcp_servers.hummingbot_api",
+        "--url",
+        api_url,
+        "--server-name",
+        str(server_name),
+    ] + _bot_id_args()
 
 
 def build_mcp_servers_for_session(
     user_id: int,
     chat_id: int | str,
     user_data: dict | None = None,
-    execution_mode: str = "loop",
     server_name: str | None = None,
+    agent_slug: str | None = None,
+    delegate_worker: bool = False,
 ) -> list[dict[str, Any]]:
     """Build dynamic MCP server configs for an agent session.
 
-    Resolves the user's default Condor server and returns ACP-format mcpServers
-    that override the static .mcp.json entries by name.
-    Always includes the condor MCP server; hummingbot is added when a valid
-    server can be resolved for the user.
+    Returns ACP-format mcpServers that override the static .mcp.json entries by
+    name. Always includes the condor MCP server; hummingbot is added when a
+    valid server can be resolved for the user.
+
+    ``server_name`` pins the run to that Condor server (an Agent with
+    ``server_required``); when omitted, the chat's ambient server is resolved
+    from the user's preferences, then from the first accessible server. Each
+    candidate must exist *and* be reachable by ``user_id`` — a name this user
+    has no grant on resolves to the next candidate, never to its credentials.
+
+    ``agent_slug`` scopes the condor MCP tools' memory/skills to that Agent's
+    own stores (``agents/{slug}/``). Without it the tools target the chat
+    condor's stores — correct for chat sessions, wrong for an Agent run: a
+    serverless consult/tick would silently read and write the CHAT's memory
+    and skills instead of the Agent's own (e.g. an agent unable to find its
+    inherited ``routine_cookbook`` skill).
+
+    ``delegate_worker`` marks a background Condor delegation (FEAT-032) so the
+    subprocess picks up the worker framing and refuses to delegate again.
     """
     from config_manager import get_config_manager, get_effective_server
 
     cm = get_config_manager()
 
-    # Resolve which hummingbot server to use (explicit override > user preferences)
-    if not server_name:
-        server_name = get_effective_server(chat_id, user_data)
-    if not server_name:
+    # Resolve which hummingbot server to use (explicit override > user
+    # preferences). Every candidate is held to existence *and* reach, because
+    # the name that comes out of here decides whose API credentials go into the
+    # subprocess env below. ``chat_id`` is not a principal — ``chat_defaults``
+    # is a global map keyed by chat, so a caller who can name someone else's
+    # chat could name their server too (SEC-178, the SEC-164 shape). The subject
+    # is always ``user_id``, the authenticated owner of the run; the same
+    # predicate guards TickEngine._resolve_server.
+    def usable(name: str | None) -> bool:
+        return bool(name and cm.get_server(name)) and cm.has_server_access(
+            user_id, name
+        )
+
+    def candidates():
+        # Lazy on purpose: resolving the chat default writes back into
+        # ``user_data``, so it must not run when a pin already answered.
+        yield server_name
+        yield get_effective_server(chat_id, user_data)
         accessible = cm.get_accessible_servers(user_id)
-        server_name = accessible[0] if accessible else None
+        yield accessible[0] if accessible else None
+
+    server_name = next((name for name in candidates() if usable(name)), None)
 
     # Condor MCP -- runs as stdio subprocess, tools work locally without TCP bridge
     # Pass resolved server_name so start_agent uses the correct server
@@ -333,8 +582,14 @@ def build_mcp_servers_for_session(
         "name": "condor",
         "command": "uv",
         "args": ["run", "python", "-m", "mcp_servers.condor"]
-        + _condor_mcp_args(chat_id, user_id, server_name=server_name),
-        "env": [],
+        + _condor_mcp_args(
+            chat_id,
+            user_id,
+            agent_slug,
+            server_name=server_name,
+            delegate_worker=delegate_worker,
+        ),
+        "env": _env_entries(TELEGRAM_BOT_TOKEN=_bot_token()),
     }
 
     if not server_name:
@@ -356,85 +611,18 @@ def build_mcp_servers_for_session(
         )
         return [condor]
 
-    api_url = f"http://{server['host']}:{server['port']}"
-
+    # Credentials go in env, not argv: the API username/password used to sit on
+    # the command line, where any local `ps` recovered them (SEC-095). The
+    # non-secret coordinates (url, server name) stay on argv, where they make a
+    # running subprocess identifiable.
     mcp_hummingbot = {
         "name": "mcp-hummingbot",
         "command": "uv",
-        "args": [
-            "run",
-            "python",
-            "-m",
-            "mcp_servers.hummingbot_api",
-            "--url",
-            api_url,
-            "--username",
-            server["username"],
-            "--password",
-            server["password"],
-            "--server-name",
-            server_name,
-        ],
-        "env": [],
-    }
-
-    return [mcp_hummingbot, condor]
-
-
-def build_mcp_servers_for_agent(
-    server_name: str,
-    user_id: int,
-    chat_id: int,
-    agent_slug: str | None = None,
-    execution_mode: str = "loop",
-) -> list[dict[str, Any]]:
-    """Build MCP server configs for a trading agent bound to a specific server.
-
-    Unlike build_mcp_servers_for_session(), this resolves the server by name
-    directly instead of using chat-based resolution.
-    Always includes the condor MCP server.
-    """
-    from config_manager import get_config_manager
-
-    cm = get_config_manager()
-
-    condor = {
-        "name": "condor",
-        "command": "uv",
-        "args": ["run", "python", "-m", "mcp_servers.condor"]
-        + _condor_mcp_args(chat_id, user_id, agent_slug, server_name=server_name),
-        "env": [],
-    }
-
-    server = cm.get_server(server_name)
-    if not server:
-        log.warning(
-            "Server '%s' not found in servers config — "
-            "trading agent will start without mcp-hummingbot",
-            server_name,
-        )
-        return [condor]
-
-    api_url = f"http://{server['host']}:{server['port']}"
-
-    mcp_hummingbot = {
-        "name": "mcp-hummingbot",
-        "command": "uv",
-        "args": [
-            "run",
-            "python",
-            "-m",
-            "mcp_servers.hummingbot_api",
-            "--url",
-            api_url,
-            "--username",
-            server["username"],
-            "--password",
-            server["password"],
-            "--server-name",
-            server_name,
-        ],
-        "env": [],
+        "args": _hummingbot_mcp_args(server, server_name),
+        "env": _env_entries(
+            HUMMINGBOT_API_USERNAME=server["username"],
+            HUMMINGBOT_API_PASSWORD=server["password"],
+        ),
     }
 
     return [mcp_hummingbot, condor]
@@ -458,7 +646,7 @@ def build_initial_context(
 
     cm = get_config_manager()
 
-    # Build system prompt from assistants/ .md + platform formatting
+    # System prompt: Condor's own AGENT.md + platform formatting
     system_prompt = _build_system_prompt(platform)
     sections: list[str] = [system_prompt]
 
@@ -588,12 +776,13 @@ def build_initial_context(
 
     # Agents index — domain Agents condor can consult (FEAT: coordinator model).
     # condor delegates domain work via consult(...) instead of holding the domain's
-    # tools/context itself. Inject only the index of *consultable* Agents; nothing
-    # when none exist.
+    # tools/context itself. EVERY agent is listed: one missing from this index can
+    # never be routed to. Nothing injected only when none exist.
     try:
         from condor.agents.agent import AgentStore
 
-        agents_index = AgentStore().list_consultable_index()
+        # The coordinator is not among its own consultees (FEAT-033).
+        agents_index = AgentStore().list_index(exclude={CHAT_SLUG})
         if agents_index:
             sections.append(
                 "[AGENTS — consult these BEFORE doing domain work with raw tools]\n"
@@ -605,7 +794,7 @@ def build_initial_context(
                 f"{agents_index}"
             )
     except Exception:
-        pass  # Consultable agents are advisory — never block session start on them.
+        pass  # The agents index is advisory — never block session start on it.
 
     return "\n\n".join(sections)
 
@@ -623,36 +812,16 @@ def build_agent_context(
     are injected (keyed by the Agent slug, FEAT-003 — the shared brain), and the
     consult task is appended last. Read on demand via manage_memory/manage_skill
     inside the run.
+
+    Those indexes come from :func:`~condor.memory.domain_context`, the same
+    builder ``binding.agent_identity_context`` composes, so this Agent carries
+    identical instructions about its own memory whether it is consulted or
+    chatted with (ARCH-099).
     """
+    from condor.memory import domain_context
+
     sections: list[str] = [agent.instructions]
-
-    try:
-        from condor.memory import MemoryStore
-
-        memory_index = MemoryStore(user_id, agent.slug).list_index()
-        if memory_index:
-            sections.append(
-                "[DOMAIN MEMORY — what you remember in this domain]\n"
-                'Read a full memory with manage_memory(action="read", name="..."). '
-                'Save new, stable domain facts with manage_memory(action="write", ...).\n\n'
-                f"{memory_index}"
-            )
-    except Exception:
-        pass
-
-    try:
-        from condor.memory import SkillStore
-
-        skills_index = SkillStore(agent.slug).list_index()
-        if skills_index:
-            sections.append(
-                "[DOMAIN SKILLS — playbooks you can follow]\n"
-                "Read-only playbooks shipped with this Agent. Read one with "
-                'manage_skill(action="read", name="...") and follow its steps.\n\n'
-                f"{skills_index}"
-            )
-    except Exception:
-        pass
+    sections.extend(domain_context(agent.slug, user_id))
 
     consult = f"[CONSULT REQUEST]\n{task}"
     if context:

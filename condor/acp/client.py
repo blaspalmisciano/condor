@@ -7,6 +7,7 @@ streaming via session/update notifications.
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 import logging
 import os
@@ -19,6 +20,33 @@ from typing import Any, AsyncIterator, Awaitable, Callable
 from .jsonrpc import JSONRPCPeer
 
 log = logging.getLogger(__name__)
+
+
+def normalize_tool_call(payload: dict[str, Any]) -> dict[str, Any]:
+    """Canonical ``{tool, title, input}`` view of an ACP ``toolCall`` (SEC-093).
+
+    The ACP wire carries a tool call's arguments under ``rawInput``; every
+    consumer in this repo reads ``input`` (``is_dangerous_tool_call``,
+    ``condor.agents.risk``, ``format_tool_summary``, the transcript recorder).
+    Left untranslated, the whole action-gated half of the danger list resolved
+    ``action == ""`` and took the auto-approve fast path, so no confirmation
+    was ever raised. This is the single seam that translates the wire shape —
+    consumers stay on one contract instead of each learning ACP's spelling.
+
+    The arguments are passed through **as they arrive**, without coercing a
+    missing or malformed value into ``{}``: the gate has to be able to tell
+    "no arguments I can read" from "an empty argument set", and fail closed on
+    the former.
+    """
+    title = payload.get("title") or ""
+    normalized = dict(payload)
+    normalized["title"] = title
+    normalized["tool"] = payload.get("tool") or title
+    args = payload.get("rawInput")
+    if args is None:
+        args = payload.get("input")
+    normalized["input"] = args
+    return normalized
 
 
 def _descendant_pids(root: int) -> set[int]:
@@ -100,20 +128,39 @@ def _ps_rows() -> list[tuple[int, int, str]]:
     return rows
 
 
+def bot_process_marker(token: str) -> str:
+    """Non-secret argv marker identifying subprocesses spawned by THIS bot.
+
+    ``ps`` output is world-readable, so the bot token itself must never sit on a
+    child's command line (SEC-095). A digest of the token gives the same
+    discrimination the raw token gave — one running bot's trees vs. another's,
+    vs. an interactive Claude Code session — while revealing nothing: the hash
+    is one-way, and the token is a high-entropy secret so it cannot be guessed
+    back from it.
+
+    Empty token → empty marker, so a tokenless dev run tags nothing (and the
+    reaper, which refuses an empty marker, seeds on nothing).
+    """
+    if not token:
+        return ""
+    return "condor-bot-" + hashlib.sha256(token.encode()).hexdigest()[:12]
+
+
 def reap_stale_acp_trees(token: str, *, wait_s: float = 2.0) -> int:
     """Kill leaked ACP/MCP subprocess trees from a prior crashed run.
 
     A hard kill (``kill -9``, OOM, power loss) bypasses the graceful shutdown
     path, orphaning the ``claude-agent-acp → claude → MCP`` tree. Call this at
     startup, BEFORE spawning any of our own subprocesses: at that point anything
-    whose cmdline carries this bot's ``token`` is necessarily a stale leak. We
-    seed on those, climb to the owning ``claude-agent-acp`` root, and kill the
-    whole tree. Interactive Claude Code sessions are never touched (their MCP
-    servers carry no token, and we explicitly exclude their signatures).
+    carrying this bot's process marker is necessarily a stale leak. We seed on
+    those, climb to the owning ``claude-agent-acp`` root, and kill the whole
+    tree. Interactive Claude Code sessions are never touched (their MCP servers
+    carry no marker, and we explicitly exclude their signatures).
 
     Returns the number of processes signalled.
     """
-    if not token:
+    marker = bot_process_marker(token)
+    if not marker:
         return 0
     rows = _ps_rows()
     if not rows:
@@ -124,8 +171,8 @@ def reap_stale_acp_trees(token: str, *, wait_s: float = 2.0) -> int:
     def _protected(a: str) -> bool:
         return "dangerously-skip-permissions" in a or "claude-code-acp" in a
 
-    # Seeds: our own MCP servers are launched with --bot-token <token>.
-    seeds = [pid for pid, _, args in rows if token in args and not _protected(args)]
+    # Seeds: our own MCP servers are launched with --bot-id <marker>.
+    seeds = [pid for pid, _, args in rows if marker in args and not _protected(args)]
     if not seeds:
         return 0
 
@@ -170,8 +217,29 @@ ACP_COMMANDS: dict[str, str] = {
     "claude-acp": "claude-agent-acp",  # model-configurable form: claude-acp:<model>
     "gemini": "npx @google/gemini-cli --acp",
     "copilot": "npx @github/copilot --acp --stdio",
-    "codex": "npx @zed-industries/codex-acp",
+    "codex": "npx @agentclientprotocol/codex-acp",
 }
+
+# Session markers Claude Code exports into the shells it spawns. If the bot was
+# launched from inside a Claude Code session (`uv run python main.py` typed at a
+# Claude Code prompt), main.py inherits them and passes them on to every ACP
+# subprocess — and the `claude` CLI behind claude-agent-acp then refuses to boot
+# with "Claude Code cannot be launched inside another Claude Code session". The
+# bridge reports that as a bare `[-32603] Internal error` (data.details:
+# "Query closed before response received"), which says nothing about the cause.
+# Our ACP children are their own top-level sessions, so we drop the markers.
+# Only the session-identity vars go — CLAUDE_CONFIG_DIR, ANTHROPIC_* and other
+# real configuration must survive.
+_CLAUDE_SESSION_ENV_VARS = (
+    "CLAUDECODE",
+    "CLAUDE_CODE_ENTRYPOINT",
+    "CLAUDE_CODE_SESSION_ID",
+    "CLAUDE_CODE_CHILD_SESSION",
+    "CLAUDE_CODE_MESSAGING_SOCKET",
+    "CLAUDE_CODE_EXECPATH",
+    "CLAUDE_PID",
+    "CLAUDE_EFFORT",
+)
 
 # ACP bases whose model can be picked via a suffix (e.g. "claude-acp:opus").
 # The suffix is selected at runtime via session/set_model against the agent's
@@ -337,12 +405,17 @@ class ACPClient:
         permission_callback: PermissionCallback | None = None,
         extra_env: dict[str, str] | None = None,
         model: str | None = None,
+        system_prompt: str = "",
     ):
         self.command = command
         self.working_dir = working_dir or os.getcwd()
         self.mcp_servers: list[dict[str, Any]] = mcp_servers or []
         self.permission_callback = permission_callback
         self.extra_env = extra_env
+        # Text APPENDED to the host's own system prompt (see start()). The only
+        # true system-level channel an ACP session has — everything else Condor
+        # sends arrives as a user turn and loses the argument (FEAT-025).
+        self.system_prompt = system_prompt
         # Requested model preference (e.g. "sonnet"); selected over the ACP
         # protocol after session/new since the bridge ignores ANTHROPIC_MODEL.
         self.model = model
@@ -361,9 +434,34 @@ class ACPClient:
 
     # --- Lifecycle ---
 
+    def _session_new_params(self) -> dict[str, Any]:
+        """Params for the ``session/new`` handshake.
+
+        ``claude-agent-acp`` reads ``_meta.systemPrompt`` here and forwards it to
+        the agent SDK: a bare string REPLACES the host preset, ``{"append": …}``
+        adds to it. We append, so a bound Agent keeps Claude Code's tool
+        discipline and only gains its own identity.
+
+        This is the channel that decides *who the model thinks it is*. An MCP
+        server's ``instructions`` do reach the model and it follows the routing
+        rules in them, but they read as guidance from a tool server, not as
+        identity — with them alone a bound Agent still answers "I'm Claude Code"
+        (FEAT-025, measured both ways against bridge 0.21.0). A bridge that
+        ignores ``_meta`` simply drops it; the handshake is unaffected.
+        """
+        params: dict[str, Any] = {
+            "cwd": self.working_dir,
+            "mcpServers": self.mcp_servers,
+        }
+        if self.system_prompt:
+            params["_meta"] = {"systemPrompt": {"append": self.system_prompt}}
+        return params
+
     async def start(self) -> None:
         """Spawn subprocess, run ACP handshake (initialize + session/new)."""
         env = dict(os.environ)
+        for var in _CLAUDE_SESSION_ENV_VARS:
+            env.pop(var, None)
         if self.extra_env:
             env.update(self.extra_env)
 
@@ -392,7 +490,7 @@ class ACPClient:
             )
             result = await self._peer.send_request(
                 "session/new",
-                {"cwd": self.working_dir, "mcpServers": self.mcp_servers},
+                self._session_new_params(),
                 self._process.stdin,
             )
         except Exception:
@@ -548,24 +646,97 @@ class ACPClient:
 
     # --- Prompt ---
 
-    def abort_prompt(self) -> None:
-        """Cancel the in-flight prompt request and drain the event queue.
-
-        The ACP subprocess will keep running (there's no protocol-level cancel),
-        but the next prompt_stream call will start clean.
-        """
-        if self._current_req_id is not None:
-            future = self._peer._pending.pop(self._current_req_id, None)
-            if future and not future.done():
-                future.cancel()
-            self._current_req_id = None
-        # Drain the queue so stale events don't leak into the next prompt
+    def _drain_events(self) -> None:
+        """Empty the event queue so stale events don't leak into the next prompt."""
         while True:
             try:
                 self._event_queue.get_nowait()
             except asyncio.QueueEmpty:
                 break
-        log.debug("ACP prompt aborted, queue drained")
+
+    def _cancel_locally(self, req_id: int) -> None:
+        """Fallback cancel: drop the pending future and clear the queue.
+
+        Used when the agent does not honour ``session/cancel``. Clearing
+        ``_current_req_id`` before cancelling the future makes ``_on_response``
+        discard a late reply, so the queue we drain here stays drained.
+        """
+        future = self._peer._pending.pop(req_id, None)
+        self._current_req_id = None
+        if future and not future.done():
+            future.cancel()
+        self._drain_events()
+        # The consumer of prompt_stream is parked on the queue; hand it a
+        # terminal event so the turn ends now rather than at the next heartbeat.
+        self._event_queue.put_nowait(PromptDone(stop_reason="cancelled"))
+
+    async def abort_prompt(self) -> None:
+        """Cancel the in-flight prompt at the agent, not just locally.
+
+        Sends ACP's ``session/cancel`` and waits for the agent to settle the
+        pending ``session/prompt`` with stopReason ``"cancelled"``, so the
+        model's context ends where the user's screen ended. Falls back to a
+        local cancel+drain when the agent does not answer within
+        ``TIMEOUTS.prompt_cancel`` — an agent that ignores the notification
+        must not hang the caller.
+        """
+        # Imported here, not at module scope: condor.runtime.events imports
+        # condor.acp, so a top-level import would close the cycle.
+        from condor.runtime.timeouts import TIMEOUTS
+
+        req_id = self._current_req_id
+        if req_id is None:
+            return
+
+        future = self._peer._pending.get(req_id)
+        if future is None or future.done() or not self.alive:
+            self._cancel_locally(req_id)
+            return
+
+        try:
+            assert self._process and self._process.stdin
+            await self._peer.send_notification(
+                "session/cancel",
+                {"sessionId": self._session_id},
+                self._process.stdin,
+            )
+        except Exception as exc:  # noqa: BLE001 - a dead pipe means fall back
+            log.warning(
+                "ACP session/cancel could not be sent (%s), cancelling locally", exc
+            )
+            self._cancel_locally(req_id)
+            return
+
+        try:
+            # Shielded: the timeout must not cancel the future itself, since
+            # _on_response is what turns the agent's reply into a PromptDone.
+            await asyncio.wait_for(
+                asyncio.shield(future), timeout=TIMEOUTS.prompt_cancel
+            )
+        except asyncio.TimeoutError:
+            log.warning(
+                "Agent did not answer session/cancel in %ss — cancelling locally. "
+                "It may still be generating.",
+                TIMEOUTS.prompt_cancel,
+            )
+            self._cancel_locally(req_id)
+            return
+        except asyncio.CancelledError:
+            # Only ours to absorb when the *request* died (e.g. the read loop
+            # tore down every pending future). A cancellation aimed at this
+            # task belongs to the caller.
+            if not future.cancelled():
+                raise
+            self._cancel_locally(req_id)
+            return
+        except Exception:
+            # The agent failed the request instead of cancelling it; _on_response
+            # already mapped that onto a PromptDone.
+            pass
+
+        if self._current_req_id == req_id:
+            self._current_req_id = None
+        log.debug("ACP prompt cancelled at the agent")
 
     async def prompt(self, text: str) -> str:
         """One-shot prompt: send text, collect all agent message chunks, return joined."""
@@ -685,7 +856,7 @@ class ACPClient:
                     title=update.get("title", ""),
                     status=update.get("status", "pending"),
                     kind=update.get("kind", "other"),
-                    input=update.get("input"),
+                    input=normalize_tool_call(update)["input"],
                 )
             )
         elif kind == "tool_call_update":
@@ -708,9 +879,21 @@ class ACPClient:
     ) -> dict[str, Any]:
         options = options or []
 
-        # If we have a permission callback, delegate to it
+        # If we have a permission callback, delegate to it. The wire shape is
+        # translated first (SEC-093) so the gate sees the arguments it decides
+        # on, and a callback that blows up denies rather than escaping into the
+        # RPC layer, where the error would surface as something other than a
+        # refusal.
         if self.permission_callback:
-            return await self.permission_callback(toolCall or {}, options)
+            tool_call = normalize_tool_call(toolCall or {})
+            try:
+                return await self.permission_callback(tool_call, options)
+            except Exception:
+                log.exception(
+                    "Permission callback failed for %s — denying",
+                    tool_call.get("title") or "<unknown tool>",
+                )
+                return {"outcome": {"outcome": "cancelled"}}
 
         # Default: auto-approve
         for opt in options:

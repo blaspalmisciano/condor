@@ -1,8 +1,10 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import {
   Activity,
   Bot,
   Brain,
+  Bug,
+  Droplets,
   Eye,
   Moon,
   Settings,
@@ -11,37 +13,79 @@ import {
   Wallet,
   Zap,
 } from "lucide-react";
-import { NavLink, Outlet, useLocation } from "react-router-dom";
+import { NavLink, Outlet, useLocation, useNavigate } from "react-router-dom";
 
 import { ConnectKeysOverlay } from "@/components/ConnectKeysOverlay";
 import { ErrorBoundary } from "@/components/ErrorBoundary";
-import { ChatPanel } from "@/components/chat/ChatPanel";
+import { ReportIssueDialog } from "@/components/ReportIssueDialog";
+import { ChatProvider } from "@/hooks/useChat";
 import { useCredentials } from "@/hooks/useCredentials";
 import { usePrefetchData } from "@/hooks/usePrefetchData";
 import { useServer } from "@/hooks/useServer";
 import { useTheme } from "@/hooks/useTheme";
-import { AgentToggleButton } from "./AgentToggleButton";
 import { CurrencySelector } from "./CurrencySelector";
 import { ServerSelector } from "./ServerSelector";
 
 const NAV_ITEMS = [
-  { to: "/", icon: Wallet, label: "Portfolio" },
+  { to: "/", icon: Brain, label: "Agents" },
+  { to: "/portfolio", icon: Wallet, label: "Portfolio" },
   { to: "/trade", icon: Swords, label: "Trade" },
+  { to: "/dex", icon: Droplets, label: "DEX" },
   { to: "/bots", icon: Bot, label: "Bots" },
   { to: "/executors", icon: Activity, label: "Executors" },
-  { to: "/agents", icon: Brain, label: "Agents" },
   { to: "/routines", icon: Zap, label: "Routines" },
 ] as const;
 
+/**
+ * The shell owns the chat state.
+ *
+ * There used to be two surfaces rendering a conversation — an overlay panel
+ * docked to the right of every page, and the workspace at `/agents` — which
+ * meant two doors to one thing. The panel is gone; the provider stays here so
+ * the socket outlives navigation between pages and `/agents`.
+ */
 export function AppShell() {
+  return (
+    <ChatProvider>
+      <AppShellBody />
+    </ChatProvider>
+  );
+}
+
+function AppShellBody() {
   const { server } = useServer();
   const { pathname } = useLocation();
   const { theme, toggleTheme } = useTheme();
-  const [chatOpen, setChatOpen] = useState(false);
+  const navigate = useNavigate();
   const { hasKeys, isLoading: keysLoading } = useCredentials();
+  const [reportOpen, setReportOpen] = useState(false);
 
+  // The chat workspace takes the full height and owns its own scrolling, so
+  // the shell drops `main`'s padding for it. It lives at `/` — the entry point
+  // — while `/agents/:slug` is an ordinary padded page, deliberately not
+  // matched here.
+  const isChatWorkspace = pathname === "/";
+
+  // The chat is the landing page and needs no exchange keys, so the blocking
+  // overlay would otherwise be the first thing every unconfigured user hits —
+  // on the one surface that can talk them through connecting.
   const exemptRoutes = ["/routines", "/settings"];
-  const showKeysOverlay = server && !keysLoading && !hasKeys && !exemptRoutes.some((r) => pathname.startsWith(r));
+  const showKeysOverlay =
+    server && !keysLoading && !hasKeys && !isChatWorkspace &&
+    !exemptRoutes.some((r) => pathname.startsWith(r));
+
+  // ⌘K used to toggle the overlay panel. It now goes to the chat, so the
+  // reflex still lands somewhere sensible instead of silently doing nothing.
+  useEffect(() => {
+    const onKeyDown = (e: KeyboardEvent) => {
+      if ((e.metaKey || e.ctrlKey) && e.key === "k") {
+        e.preventDefault();
+        navigate("/");
+      }
+    };
+    window.addEventListener("keydown", onKeyDown);
+    return () => window.removeEventListener("keydown", onKeyDown);
+  }, [navigate]);
 
   // Prefetch core data (executors, bots) and subscribe to WS channels early
   usePrefetchData();
@@ -84,6 +128,14 @@ export function AppShell() {
           <CurrencySelector />
 
           <div className="flex items-center gap-1">
+            <button
+              onClick={() => setReportOpen(true)}
+              className="rounded p-1.5 text-[var(--color-text-muted)] hover:bg-[var(--color-surface-hover)] hover:text-[var(--color-accent)]"
+              title="Report an issue"
+            >
+              <Bug className="h-4 w-4" />
+            </button>
+
             <NavLink
               to="/settings"
               className={({ isActive }) =>
@@ -113,21 +165,22 @@ export function AppShell() {
             </button>
 
           </div>
-
-          <AgentToggleButton active={chatOpen} onClick={() => setChatOpen((v) => !v)} className="ml-2" />
         </div>
       </header>
 
       {/* Main content */}
-      <main className="relative flex-1 overflow-auto p-6">
+      <main
+        className={`relative flex-1 ${
+          isChatWorkspace ? "overflow-hidden" : "overflow-auto p-6"
+        }`}
+      >
         <ErrorBoundary resetKey={pathname + server}>
           <Outlet key={server} />
         </ErrorBoundary>
         {showKeysOverlay && <ConnectKeysOverlay />}
       </main>
 
-      {/* Chat panel */}
-      <ChatPanel isOpen={chatOpen} onToggle={setChatOpen} />
+      <ReportIssueDialog open={reportOpen} onClose={() => setReportOpen(false)} />
     </div>
   );
 }

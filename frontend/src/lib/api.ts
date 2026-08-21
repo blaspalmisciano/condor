@@ -1,4 +1,4 @@
-import { authHeaders } from "./auth-token";
+import { authFetch, authHeaders } from "./auth-token";
 
 async function apiFetch<T>(path: string, init?: RequestInit): Promise<T> {
   const headers: Record<string, string> = {
@@ -186,6 +186,17 @@ export interface ExecutorInfo {
   config: Record<string, unknown>;
 }
 
+/** Executor totals for a period, aggregated server-side over the full history.
+ *  `pnl` and `volume` are USD-denominated; `converted` is false when some quote
+ *  asset had no path to USD and its rows were counted in their own quote. */
+export interface ExecutorPeriodSummary {
+  period: string;
+  pnl: number;
+  volume: number;
+  count: number;
+  converted: boolean;
+}
+
 export interface PositionHeld {
   connector_name: string;
   trading_pair: string;
@@ -247,6 +258,166 @@ export interface MarketPrice {
   best_ask: number;
 }
 
+/**
+ * The pool a DEX pair trades in — the same one the chart's candles come from.
+ *
+ * `lp_supported` is false, with a null `lp_provider`, whenever the deepest pool is
+ * not one an `lp_executor` can add liquidity to (a router, a plain AMM, Uniswap
+ * v4). That is a normal answer, not an error: the LP panel responds by asking for
+ * a pool address by hand. `current_price` is the base priced in quote — the scale
+ * every LP bound is expressed in — and is null when GeckoTerminal reports no price.
+ */
+/** Wire shape of `GET /market/venues`; mapped to `VenueTraits` on the way in. */
+interface WireVenue {
+  name: string;
+  hummingbot_market_data: boolean;
+  clmm_lp: boolean;
+}
+
+/**
+ * One pool as the DEX browser and workspace see it: the market numbers from the
+ * upstream, plus the venue facts the server decides (`lp_supported`, `tradable`,
+ * `trading_pair`) because they depend on which connectors Condor drives, not on
+ * anything the browser can know.
+ */
+export interface PoolSummary {
+  address: string;
+  name: string;
+  source: "gecko" | "gateway";
+  dex_id: string;
+  /** Chain as the caller named it, and the Gateway network its rows link to. */
+  network: string;
+  gecko_network: string;
+  gateway_network: string;
+  base_symbol: string;
+  quote_symbol: string;
+  base_token_symbol: string;
+  quote_token_symbol: string;
+  base_token_address: string;
+  quote_token_address: string;
+  /** `<base_mint>-<quote_symbol>`, the form LP and DEX order executors carry. */
+  trading_pair: string;
+  /** An `lp_executor` provider (`meteora/clmm`), or null when the pool is not CLMM. */
+  lp_provider: string | null;
+  lp_supported: boolean;
+  /** False when GeckoTerminal indexes this chain but Gateway does not reach it. */
+  tradable: boolean;
+  has_bins: boolean;
+  reserve_usd: number | null;
+  volume_24h: number | null;
+  price_change_24h: number | null;
+  current_price?: number | null;
+  base_token_price_usd?: number | null;
+  quote_token_price_usd?: number | null;
+  /** Gateway CLMM only: Meteora reports `apr` as 24h fee/TVL, `apy` annualized. */
+  apr?: number | null;
+  apy?: number | null;
+  /** True when `apr`/`apy` were derived from volume x fee tier, not reported. */
+  apr_estimated?: boolean;
+  fees_24h?: number | null;
+  bin_step?: number | null;
+  base_fee_percentage?: number | null;
+  pool_created_at?: string | null;
+}
+
+/** One CLMM bin: the liquidity sitting at one price step of a pool. */
+export interface LiquidityBin {
+  price: number;
+  base_amount: number;
+  quote_amount: number;
+  /** Null when the pool's token prices are unknown; size bars by amount then. */
+  liquidity_usd: number | null;
+}
+
+export interface PoolBins {
+  bins: LiquidityBin[];
+  active_price: number | null;
+  bin_step: number | null;
+  /** False is a state to render (with `reason`), never an error to surface. */
+  available: boolean;
+  reason: string | null;
+}
+
+export interface PoolQuery {
+  source: "gecko" | "gateway" | "orca";
+  /** source=gecko: the chain, as a Gateway network id or a gecko chain id. */
+  network?: string;
+  /** source=gecko: trending | top | new | token. */
+  view?: string;
+  /** source=gateway: the CLMM connector. */
+  connector?: string;
+  /** source=gecko+view=token: a token address. source=gateway|orca: free text. */
+  query?: string;
+  /** source=gecko: GeckoTerminal dex ids to keep. Empty means every venue. */
+  dexes?: string[];
+  limit?: number;
+  /** 1-based. Every upstream pages; only orca knows whether a next page exists. */
+  page?: number;
+}
+
+/**
+ * How much of the shared GeckoTerminal budget is left, and whether it just ran out.
+ *
+ * Every DEX view reads the same per-IP budget, and every failure behind it
+ * degrades to an empty list — so without this a throttled fetch and a chain with
+ * no pools look identical in the table.
+ */
+export interface DexUpstream {
+  /** The breaker is open: gecko answered 429 and Condor has stopped calling. */
+  rate_limited: boolean;
+  /** *This* response was short because the request was refused. Can be true while
+   *  `rate_limited` is false: a spent per-minute budget refuses without tripping. */
+  throttled_request: boolean;
+  /** Seconds left on the cooldown, at the time the response was produced. */
+  retry_in: number;
+  requests_last_minute: number;
+  budget: number;
+  /** Monotonic counters, so a poller can spot a refusal it did not witness. */
+  throttled_calls: number;
+  count_429: number;
+  seconds_since_429: number | null;
+}
+
+/**
+ * What became of one token Condor tried to register with Gateway.
+ *
+ * `symbol_taken` is the one worth surfacing: another token on the list already
+ * holds this ticker, so Gateway refused to save this one and its balance will
+ * keep reading 0 until a human decides which token owns the symbol.
+ */
+export type DexTokenVerdict = "listed" | "added" | "symbol_taken" | "failed";
+
+/** A page of pools. `has_more`, not a count — no upstream reports a total. */
+export interface PoolPage {
+  pools: PoolSummary[];
+  has_more: boolean;
+  /** Absent on the Gateway/Orca tabs, which do not read GeckoTerminal. */
+  upstream?: DexUpstream;
+}
+
+/** One venue GeckoTerminal indexes on a chain, for the browser's dex filter. */
+export interface DexVenue {
+  id: string;
+  name: string;
+}
+
+/** A chain the pool browser can browse, as Gateway names it. */
+export interface DexChain {
+  network_id: string;
+  chain: string;
+  label: string;
+}
+
+export interface DexPoolInfo {
+  pool_address: string | null;
+  dex_id: string | null;
+  lp_provider: string | null;
+  lp_supported: boolean;
+  current_price: number | null;
+  base_symbol: string | null;
+  quote_symbol: string | null;
+}
+
 export interface OrderBookLevel {
   price: number;
   amount: number;
@@ -270,6 +441,21 @@ export interface TradingRule {
 export interface TradingRulesResponse {
   connector: string;
   rules: TradingRule[];
+}
+
+export interface Ticker {
+  trading_pair: string;
+  price: number;
+  base_volume: number;
+  quote_volume: number;
+  /** 24h volume in USD; null when the quote asset couldn't be priced. */
+  usd_volume: number | null;
+}
+
+export interface TickersResponse {
+  connector: string;
+  tickers: Ticker[];
+  updated_at: number | null;
 }
 
 // ── Deploy Bot ──
@@ -325,11 +511,14 @@ export interface RunningInstance {
   fees: number;
   open_count: number;
   closed_count: number;
-  win_rate: number;
+  /** null = no closed executors to derive it from (bot-mode sessions), not 0%. */
+  win_rate: number | null;
   server_name: string;
   total_amount_quote: number;
   trading_context: string;
   frequency_sec: number;
+  /** Wall-clock budget for one tick's agent session, in seconds. */
+  tick_timeout_sec: number;
   execution_mode: "dry_run" | "run_once" | "loop";
   risk_limits: Record<string, unknown>;
 }
@@ -350,11 +539,21 @@ export interface StrategySummary {
   instances: RunningInstance[];
 }
 
+/**
+ * The coordinator's slug — the Agent you get by binding none.
+ *
+ * Condor lives in the same registry as every specialist (FEAT-033), so it
+ * comes back from `/agents` like the rest. But a chat is *with* Condor
+ * precisely when `agent_slug` is empty, so any list of specialists to bind has
+ * to lift it out or offer the same identity twice.
+ */
+export const CHAT_SLUG = "condor";
+
 export interface AgentSummary {
   slug: string;
   name: string;
   description: string;
-  consultable: boolean;
+  /** Routing hint only — every Agent is consultable, delegable and loopable. */
   when_to_consult: string;
   agent_key: string;
   strategy_count: number;
@@ -404,10 +603,60 @@ export interface AgentPerformance {
   volume: number;
   fees: number;
   trade_count: number;
-  win_rate: number;
+  /** null = no closed executors to derive it from (bot-mode sessions), not 0%. */
+  win_rate: number | null;
   open_count: number;
   closed_count: number;
   executors: AgentExecutorRow[];
+  // ── Bot-mode attribution ──
+  // A session trading through bots has no rows in the agent_id-keyed executor
+  // table: its executors live inside the bot instance's own database, and the
+  // only ones Condor can reconstruct are the positions open right now. These say
+  // what the session actually operated when `executors` is empty.
+  /** Instance names alive now, one per owned base. */
+  bot_names?: string[];
+  /** Every instance ever deployed under an owned base, oldest first — a name in
+   *  here but not in `bot_names` is one this session already stopped. */
+  bot_instances?: string[];
+  /** Owned bases with no live and no archived instance: their PnL is unknown,
+   *  not zero, so the totals are a floor. */
+  unresolved_bases?: string[];
+  controllers?: AgentControllerRow[];
+  /** Raw `CloseType.X -> n` across the operated bots. `trade_count` counts only
+   *  round-trip closes and reads a directional controller's risk stop as churn,
+   *  so this is what explains "0 trades" on non-zero volume. */
+  close_type_counts?: Record<string, number>;
+  /** False when `fees` is a floor: the backend reports no cumulative fee column,
+   *  so 0 means unknown rather than free. */
+  fees_known?: boolean;
+}
+
+/** One controller of one bot instance a session operated. */
+export interface AgentControllerRow {
+  /** The deploy this controller ran under. */
+  bot_name: string;
+  controller_id: string;
+  controller_name: string;
+  connector: string;
+  trading_pair: string;
+  /** From the performance snapshot, which reports "running" even for archived
+   *  instances — never render this as live truth. Derive liveness from whether
+   *  `bot_name` appears in `AgentPerformance.bot_names`. */
+  status: string;
+  realized_pnl_quote: number;
+  unrealized_pnl_quote: number;
+  volume_traded: number;
+  cum_fees_quote: number;
+  closed_trades: number;
+  close_type_counts: Record<string, number>;
+}
+
+export interface SessionCanvas {
+  sections: Record<string, string>;
+  section_titles: Record<string, string>;
+  section_order: string[];
+  last_revised_tick: number;
+  revisions: { tick: number; section: string; text: string }[];
 }
 
 export interface AgentPerformanceResponse {
@@ -440,14 +689,26 @@ export interface AgentDetail {
   agent_key: string;
   tools: string[];
   when_to_consult: string;
-  consultable: boolean;
   server_required: boolean;
   server_name: string;
   strategies: StrategySummary[];
 }
 
+// How a delegation ended. `running`…`stopped` come from the live registry;
+// `interrupted` is a task whose process died mid-flight, and `unknown` a
+// transcript too old to say — both only ever arrive from history.
+export type DelegationStatus =
+  | "running"
+  | "done"
+  | "error"
+  | "stopped"
+  | "interrupted"
+  | "unknown";
+
 // Delegation = a fire-and-forget background task handed to a detached Agent
-// instance (DELEGATE mode). Ephemeral + in-process; status drives the UI.
+// instance (DELEGATE mode). The registry is in-process, but the record outlives
+// it on disk — so this shape also comes back from history (FEAT-035), where
+// `ended_at`/`tool_count` are known and the live registry has nothing to say.
 export interface Delegation {
   task_id: string;
   agent: string;
@@ -455,10 +716,36 @@ export interface Delegation {
   chat_id: number;
   server_name: string | null;
   task: string;
-  status: "running" | "done" | "error" | "stopped";
+  status: DelegationStatus;
   result: string;
   error: string;
+  /** The conversation that started this task; "" when there was none. */
+  conversation_id: string;
+  /** Wall-clock start (epoch seconds) — drives the elapsed time. */
+  started_at: number;
+  ended_at?: number;
+  tool_count?: number;
 }
+
+/** A history row: the record minus the bodies, which the sheet fetches on open. */
+export type DelegationSummary = Omit<Delegation, "result" | "error">;
+
+// One entry of a delegation's session transcript. Mirrors the three shapes the
+// runner's event sink folds into `DelegateTask.events`; tool entries are patched
+// in place server-side, so `id` is stable across a status flip.
+export type DelegationEvent =
+  | { type: "thought"; text: string }
+  | { type: "text"; text: string }
+  | {
+      type: "tool";
+      id: string;
+      name: string;
+      status: string;
+      kind: string;
+      input: Record<string, unknown> | null;
+      /** Clipped at 2000 chars, the same boundary the on-disk transcript uses. */
+      output: string | null;
+    };
 
 // Strategy = a playbook that loops under an Agent. Holds the operational
 // history: sessions, experiments, live instances, config and learnings.
@@ -512,11 +799,20 @@ export interface RoutineInstance {
   config: Record<string, unknown>;
   status: string;
   source: string;
+  /**
+   * The conversation that asked for this run, "" for the scheduler, the
+   * dashboard and Telegram. Set since ARCH-089, and what scopes a run to a
+   * chat — the routine's own name cannot, since an agent runs shared-library
+   * routines under their bare name.
+   */
+  conversation_id?: string;
   schedule?: Record<string, unknown>;
   created_at: number;
   last_run_at: number | null;
   last_result: string | null;
   last_duration: number | null;
+  /** The report the last run rendered, if it rendered one. */
+  report_id?: string | null;
   run_count: number;
   has_result?: boolean;
   result_text?: string;
@@ -586,6 +882,8 @@ export interface ReportSummary {
   source_type: string;
   source_name: string;
   tags: string[];
+  /** Producing assistant — "" on reports written before attribution existed. */
+  agent?: string;
 }
 
 export interface ReportsListResponse {
@@ -609,6 +907,23 @@ export interface GatewayStatus {
   image?: string;
   created_at?: string;
   container_status?: string;
+}
+
+export interface GatewayNetworkInfo {
+  network_id: string;
+  chain: string;
+  network: string;
+}
+
+export interface GatewayNetworkConfig {
+  network_id: string;
+  config: Record<string, unknown>;
+}
+
+export interface GatewayWalletGroup {
+  chain: string;
+  walletAddresses: string[];
+  default_address?: string;
 }
 
 export interface CredentialInfo {
@@ -649,22 +964,155 @@ export interface VoiceSettingsResponse {
 export interface ChatAgentOption {
   key: string;
   label: string;
+  /** True for sentinels that open a model list ("openrouter:", "custom:")
+   *  rather than naming a startable model. Sent explicitly because the key's
+   *  shape doesn't tell you — "ollama:" also ends in a colon but IS startable. */
+  picker?: boolean;
 }
 
-export interface ChatModeOption {
-  key: string;
-  label: string;
-  description: string;
+/** A saved OpenAI-compatible endpoint (Venice AI, Together, local vLLM, ...). */
+export interface CustomProvider {
+  name: string;
+  base_url: string;
+  has_key: boolean;
 }
 
 export interface ChatOptionsResponse {
   agents: ChatAgentOption[];
-  modes: ChatModeOption[];
+  custom_providers: CustomProvider[];
   default_agent: string;
-  default_mode: string;
+}
+
+export interface OpenRouterModelOption {
+  slug: string;
+  name: string;
+  context_length: number;
+  prompt_price: number;
+  completion_price: number;
+}
+
+/** A domain Agent a session can be bound to. Every Agent is chattable. */
+export interface AgentBindingOption {
+  slug: string;
+  name: string;
+  description: string;
+  when_to_consult: string;
+  /** The model it answers on unless the user overrides one — its own default. */
+  agent_key: string;
+}
+
+export interface SessionOptionsResponse extends ChatOptionsResponse {
+  servers: string[];
+  agent_bindings: AgentBindingOption[];
+}
+
+/** Mirrors condor/runtime/models.py SessionInfo. */
+export interface SessionInfo {
+  key: string;
+  agent_key: string;
+  user_id: number | null;
+  /** Originating frontend: "tg" | "web" | "mcp". */
+  surface: string;
+  slot: string;
+  server_name: string | null;
+  /** The bound Agent pinned this server; the chat cannot change it. */
+  server_pinned: boolean;
+  is_busy: boolean;
+  alive: boolean;
+  created_at: string;
+  last_prompt_at: string | null;
+  /** Bound domain Agent, or "" for the plain assistant. */
+  agent_slug: string;
+  /** Display name of whoever is answering. */
+  label: string;
+  /** Durable conversation behind this session. Outlives it. */
+  conversation_id: string;
+}
+
+export interface CreateSessionRequest {
+  key: string;
+  agent_key: string;
+  server_name?: string | null;
+  agent_slug?: string;
+  lazy_context?: boolean;
+  /** Empty mints a new conversation; an id resumes that transcript. */
+  conversation_id?: string;
+}
+
+// ── Conversations ──
+//
+// A session is the live subprocess; a conversation is what was said. The
+// second outlives the first, so this — not localStorage — is the source of
+// truth for a transcript.
+
+export interface ConversationMeta {
+  id: string;
+  user_id: number;
+  /** Where it was born: "tg" | "web" | "mcp". */
+  surface: string;
+  title: string;
+  agent_key: string;
+  agent_slug: string;
+  server_name: string | null;
+  created_at: string;
+  updated_at: string;
+  turn_count: number;
+  last_snippet: string;
+}
+
+export interface ConversationTurn {
+  /** "user" | "assistant" | "system". */
+  role: string;
+  text: string;
+  thought: string;
+  tool_calls: { id?: string; title?: string; status?: string }[];
+  /** System entries only: "switch" | "error". */
+  kind: string;
+  ts: number;
+}
+
+export interface ConversationDetail {
+  meta: ConversationMeta;
+  turns: ConversationTurn[];
+}
+
+export interface SwitchSessionRequest {
+  agent_slug?: string;
+  agent_key?: string;
+  /** Move the conversation to this server. Also a respawn — the server is
+   *  baked into the MCP subprocess at spawn. */
+  server_name?: string;
+  /** Short recap carried into the new session — the subprocess is replaced. */
+  handoff?: string;
+}
+
+/** Agent key for a model served by a saved custom endpoint. Mirrors
+ *  build_custom_agent_key() in condor/preferences.py. */
+export function customAgentKey(provider: string, model: string): string {
+  return `custom@${provider}:${model}`;
+}
+
+/** Inverse of customAgentKey; returns null for non-custom keys. */
+export function parseCustomAgentKey(
+  agentKey: string,
+): { provider: string; model: string } | null {
+  const colon = agentKey.indexOf(":");
+  if (colon < 0) return null;
+  const prefix = agentKey.slice(0, colon);
+  if (!prefix.startsWith("custom@")) return null;
+  return { provider: prefix.slice("custom@".length), model: agentKey.slice(colon + 1) };
 }
 
 // ── Backtesting ──
+
+export interface AppEnvResponse {
+  version: string;
+  branch: string;
+  python: string;
+  os: string;
+  arch: string;
+  in_docker: boolean;
+}
 
 export interface BacktestTask {
   task_id: string;
@@ -680,6 +1128,9 @@ export interface BacktestTask {
 
 export const api = {
   getServers: () => apiFetch<ServerInfo[]>("/api/v1/servers"),
+
+  /** Build identity — shown to the user when they file an issue. */
+  getEnv: () => apiFetch<AppEnvResponse>("/api/v1/meta/env"),
 
   getServerStatus: (name: string) =>
     apiFetch<{ online: boolean; error?: string }>(
@@ -856,6 +1307,11 @@ export const api = {
     );
   },
 
+  getExecutorsSummary: (server: string, period: string) =>
+    apiFetch<ExecutorPeriodSummary>(
+      `/api/v1/servers/${encodeURIComponent(server)}/executors/summary?period=${encodeURIComponent(period)}`,
+    ),
+
   getExecutorsPage: (
     server: string,
     params: {
@@ -914,20 +1370,144 @@ export const api = {
   getConnectedExchanges: (server: string) =>
     apiFetch<string[]>(`/api/v1/servers/${encodeURIComponent(server)}/market/connected-exchanges`),
 
+  /** Venues the trade panel can offer, with the traits each UI decision rests on. */
+  getVenues: (server: string) =>
+    apiFetch<{ venues: WireVenue[] }>(
+      `/api/v1/servers/${encodeURIComponent(server)}/market/venues`,
+    ).then((r) =>
+      (r.venues ?? []).map((v) => ({
+        name: v.name,
+        hummingbotMarketData: !!v.hummingbot_market_data,
+        clmmLp: !!v.clmm_lp,
+      })),
+    ),
+
+  getDexPool: (server: string, connector: string, pair: string) =>
+    apiFetch<DexPoolInfo>(
+      `/api/v1/servers/${encodeURIComponent(server)}/market/dex-pool?connector=${encodeURIComponent(connector)}&trading_pair=${encodeURIComponent(pair)}`,
+    ),
+
+  /** Pools to browse, from GeckoTerminal (by chain) or Gateway CLMM (by connector). */
+  getDexPools: (server: string, q: PoolQuery): Promise<PoolPage> => {
+    const params = new URLSearchParams({ source: q.source });
+    if (q.network) params.set("network", q.network);
+    if (q.view) params.set("view", q.view);
+    if (q.connector) params.set("connector", q.connector);
+    if (q.query) params.set("query", q.query);
+    if (q.dexes?.length) params.set("dexes", q.dexes.join(","));
+    params.set("limit", String(q.limit ?? 20));
+    params.set("page", String(q.page ?? 1));
+    return apiFetch<{
+      pools: PoolSummary[];
+      has_more?: boolean;
+      upstream?: DexUpstream;
+    }>(`/api/v1/servers/${encodeURIComponent(server)}/dex/pools?${params}`).then(
+      (r) => ({
+        pools: r.pools ?? [],
+        has_more: !!r.has_more,
+        upstream: r.upstream,
+      }),
+    );
+  },
+
+  /**
+   * The chains the pool browser can offer: the intersection of what this Gateway
+   * is configured for and what GeckoTerminal indexes. Asked of the server rather
+   * than hardcoded, so a chain the operator adds to Gateway shows up on its own.
+   */
+  getDexChains: (server: string) =>
+    apiFetch<{ chains: DexChain[] }>(
+      `/api/v1/servers/${encodeURIComponent(server)}/dex/chains`,
+    ).then((r) => r.chains ?? []),
+
+  /** The venues a chain has, so the dex filter offers what exists, not a guess. */
+  getDexVenues: (server: string, network: string) =>
+    apiFetch<{ dexes: DexVenue[] }>(
+      `/api/v1/servers/${encodeURIComponent(server)}/dex/dexes?network=${encodeURIComponent(network)}`,
+    ).then((r) => r.dexes ?? []),
+
+  /**
+   * Several pools by address, for the favourites view. A favourite is a saved
+   * address, so its TVL and volume are re-read rather than replayed from
+   * whenever it was starred.
+   */
+  getDexPoolsByAddress: (
+    server: string,
+    network: string,
+    addresses: string[],
+  ): Promise<PoolPage> =>
+    apiFetch<{ pools: PoolSummary[]; upstream?: DexUpstream }>(
+      `/api/v1/servers/${encodeURIComponent(server)}/dex/pools-by-address?network=${encodeURIComponent(network)}&addresses=${encodeURIComponent(addresses.join(","))}`,
+    ).then((r) => ({
+      pools: r.pools ?? [],
+      has_more: false,
+      upstream: r.upstream,
+    })),
+
+  /**
+   * Whether GeckoTerminal is currently throttling Condor.
+   *
+   * Reads process-local counters only, so polling it while a cooldown banner
+   * counts down costs nothing of the budget the banner is waiting on.
+   */
+  getDexUpstream: (server: string) =>
+    apiFetch<DexUpstream>(
+      `/api/v1/servers/${encodeURIComponent(server)}/dex/upstream`,
+    ),
+
+  /**
+   * Make sure Gateway's token list holds a pool's two tokens.
+   *
+   * Gateway resolves a swap by mint address on its own, but not a *balance*: it
+   * skips token accounts whose mint is not on the list, so an unregistered token
+   * reads as 0 and the panel greys out its percentage presets. Called when a pool
+   * opens rather than when an order is sent, and idempotent server-side, so
+   * re-opening the same pool costs nothing.
+   */
+  ensureDexTokens: (server: string, network: string, addresses: string[]) =>
+    apiFetch<{ tokens: Record<string, DexTokenVerdict> }>(
+      `/api/v1/servers/${encodeURIComponent(server)}/dex/tokens`,
+      { method: "POST", body: JSON.stringify({ network, addresses }) },
+    ),
+
+  /** One pool by address, so /dex/{network}/{address} renders from the URL alone. */
+  getDexPoolByAddress: (server: string, address: string, network: string) =>
+    apiFetch<PoolSummary>(
+      `/api/v1/servers/${encodeURIComponent(server)}/dex/pools/${encodeURIComponent(address)}?network=${encodeURIComponent(network)}`,
+    ),
+
+  /**
+   * A pool's liquidity bins, for the depth column beside its chart. Answers
+   * `available: false` with a reason rather than failing: a venue Condor cannot
+   * read bins from is something to say, not an error to raise.
+   */
+  getPoolBins: (server: string, address: string, network: string, connector: string) =>
+    apiFetch<PoolBins>(
+      `/api/v1/servers/${encodeURIComponent(server)}/dex/pools/${encodeURIComponent(address)}/bins?network=${encodeURIComponent(network)}&connector=${encodeURIComponent(connector)}`,
+    ),
+
   getPrice: (server: string, connector: string, pair: string) =>
     apiFetch<MarketPrice>(
       `/api/v1/servers/${encodeURIComponent(server)}/market/prices?connector=${encodeURIComponent(connector)}&trading_pair=${encodeURIComponent(pair)}`,
     ),
 
-  getRateOracleRates: (server: string, tradingPairs: string[]) =>
-    apiFetch<{ rates: Record<string, number> }>(
-      `/api/v1/servers/${encodeURIComponent(server)}/rate-oracle/rates`,
-      { method: "POST", body: JSON.stringify({ trading_pairs: tradingPairs }) },
+  getRates: (server: string, tradingPairs: string[], connector?: string) =>
+    apiFetch<{ rates: Record<string, number | null> }>(
+      `/api/v1/servers/${encodeURIComponent(server)}/market/rates`,
+      {
+        method: "POST",
+        body: JSON.stringify({ trading_pairs: tradingPairs, connector }),
+      },
     ),
 
   getTradingRules: (server: string, connector: string) =>
     apiFetch<TradingRulesResponse>(
       `/api/v1/servers/${encodeURIComponent(server)}/market/trading-rules?connector=${encodeURIComponent(connector)}`,
+    ),
+
+  getTickers: (server: string, connector: string) =>
+    apiFetch<TickersResponse>(
+      `/api/v1/servers/${encodeURIComponent(server)}/market/tickers?connector=${encodeURIComponent(connector)}`,
     ),
 
   getOrderBook: (
@@ -948,12 +1528,23 @@ export const api = {
     limit = 1000,
     startTime?: number,
     endTime?: number,
+    poolAddress?: string,
   ) => {
     let url = `/api/v1/servers/${encodeURIComponent(server)}/market/candles?connector=${encodeURIComponent(connector)}&trading_pair=${encodeURIComponent(pair)}&interval=${encodeURIComponent(interval)}&limit=${limit}`;
     if (startTime) url += `&start_time=${startTime}`;
     if (endTime) url += `&end_time=${endTime}`;
+    // DEX/LP executors: the pool address routes the backend to GeckoTerminal,
+    // since these connectors have no CEX candle feed.
+    if (poolAddress) url += `&pool_address=${encodeURIComponent(poolAddress)}`;
     return apiFetch<CandleData[]>(url);
   },
+
+  // Resolve a token address → ticker (GeckoTerminal). Not server-scoped; used to
+  // render LP/DEX pairs, which are stored as `<address>-<quote>`.
+  getTokenSymbol: (mint: string, network?: string) =>
+    apiFetch<{ mint: string; symbol: string }>(
+      `/api/v1/market/token-symbol?mint=${encodeURIComponent(mint)}${network ? `&network=${encodeURIComponent(network)}` : ""}`,
+    ),
 
   // ── Agents (identity + brain) ──
 
@@ -983,24 +1574,58 @@ export const api = {
       body: JSON.stringify({ content }),
     }),
 
+  /** Set or clear the Agent's server pin and model. An empty `server_name`
+   *  clears the pin, so the Agent follows whatever server the chat is pointed
+   *  at; an empty `agent_key` clears the model, falling back to the chat's. */
+  updateAgentConfig: (
+    slug: string,
+    data: { server_name?: string; server_required?: boolean; agent_key?: string },
+  ) =>
+    apiFetch<{
+      updated: boolean;
+      server_name: string;
+      server_required: boolean;
+      agent_key: string;
+    }>(`/api/v1/agents/${encodeURIComponent(slug)}/config`, {
+      method: "PATCH",
+      body: JSON.stringify(data),
+    }),
+
   deleteAgent: (slug: string) =>
     apiFetch<{ deleted: boolean }>(`/api/v1/agents/${encodeURIComponent(slug)}`, {
       method: "DELETE",
     }),
 
-  consultAgent: (
-    slug: string,
-    data: { task: string; context?: string; chat_id?: number; server_name?: string },
-  ) =>
-    apiFetch<{ agent: string; answer: string }>(
-      `/api/v1/agents/${encodeURIComponent(slug)}/consult`,
-      { method: "POST", body: JSON.stringify(data) },
-    ),
-
   // ── Delegations (fire-and-forget background agent tasks) ──
 
   getDelegations: () =>
     apiFetch<{ delegations: Delegation[] }>("/api/v1/agents/delegations"),
+
+  /** Every delegation ever recorded, newest first — live ones included, and the
+   *  ones whose process is long gone. Optionally scoped to one agent. */
+  getDelegationHistory: (agent?: string, limit = 100) =>
+    apiFetch<{ delegations: DelegationSummary[] }>(
+      `/api/v1/agents/delegations/history?limit=${limit}` +
+        (agent ? `&agent=${encodeURIComponent(agent)}` : ""),
+    ),
+
+  /** One delegation's full record, from the registry or from disk. */
+  getDelegation: (taskId: string) =>
+    apiFetch<Delegation>(
+      `/api/v1/agents/delegations/${encodeURIComponent(taskId)}`,
+    ),
+
+  /** The human-facing transcript. Separate from the (agent-facing) status route
+   *  on purpose — see `get_delegation_events` in condor/web/routes/agents.py.
+   *  `markdown` is the fallback for records written before the events sidecar:
+   *  no structured events, just the transcript as it was rendered to disk. */
+  getDelegationEvents: (taskId: string) =>
+    apiFetch<{
+      task_id: string;
+      status: DelegationStatus;
+      events: DelegationEvent[];
+      markdown: string;
+    }>(`/api/v1/agents/delegations/${encodeURIComponent(taskId)}/events`),
 
   stopDelegation: (taskId: string) =>
     apiFetch<{ task_id: string; status: string }>(
@@ -1016,6 +1641,13 @@ export const api = {
   getStrategy: (slug: string, sslug: string) =>
     apiFetch<StrategyDetail>(
       `/api/v1/agents/${encodeURIComponent(slug)}/strategies/${encodeURIComponent(sslug)}`,
+    ),
+
+  /** Materialize the Agent's default playbook (idempotent) so it can be tuned/looped. */
+  createDefaultStrategy: (slug: string) =>
+    apiFetch<StrategySummary>(
+      `/api/v1/agents/${encodeURIComponent(slug)}/strategies/default`,
+      { method: "POST" },
     ),
 
   createStrategy: (
@@ -1058,7 +1690,14 @@ export const api = {
     ),
 
   getStrategySessionExecutors: (slug: string, sslug: string, sessionNum: number) =>
-    apiFetch<{ executors: AgentExecutorRow[]; performance: AgentPerformance }>(
+    apiFetch<{
+      executors: AgentExecutorRow[];
+      performance: AgentPerformance;
+      // Realized-PnL curve sliced from the session's bot-ownership window. Derived
+      // from the bots' own history, not from the journal's per-tick snapshots,
+      // which only record what the aggregator believed at the time.
+      pnl_series?: { timestamp: string; pnl: number; volume: number }[];
+    }>(
       `/api/v1/agents/${encodeURIComponent(slug)}/strategies/${encodeURIComponent(sslug)}/sessions/${sessionNum}/executors`,
     ),
 
@@ -1115,6 +1754,17 @@ export const api = {
   getSessionSnapshots: (slug: string, sslug: string, sessionNum: number) =>
     apiFetch<{ snapshots: SnapshotSummary[] }>(
       `/api/v1/agents/${encodeURIComponent(slug)}/strategies/${encodeURIComponent(sslug)}/sessions/${sessionNum}/snapshots`,
+    ),
+
+  getSessionCanvas: (slug: string, sslug: string, sessionNum: number) =>
+    apiFetch<SessionCanvas>(
+      `/api/v1/agents/${encodeURIComponent(slug)}/strategies/${encodeURIComponent(sslug)}/sessions/${sessionNum}/canvas`,
+    ),
+
+  // The live report this session keeps — `{report: null}` when it has none.
+  getSessionReport: (slug: string, sslug: string, sessionNum: number) =>
+    apiFetch<{ report: ReportSummary | null }>(
+      `/api/v1/agents/${encodeURIComponent(slug)}/strategies/${encodeURIComponent(sslug)}/sessions/${sessionNum}/report`,
     ),
 
   getSnapshot: (slug: string, sslug: string, sessionNum: number, tick: number) =>
@@ -1191,18 +1841,35 @@ export const api = {
 
   // ── Reports ──
 
-  getReports: (params?: { source_type?: string; tag?: string; search?: string; limit?: number; offset?: number }) => {
+  getReports: (params?: { source_type?: string; tag?: string; search?: string; agent?: string; limit?: number; offset?: number }) => {
     const qs = new URLSearchParams();
     if (params?.source_type) qs.set("source_type", params.source_type);
     if (params?.tag) qs.set("tag", params.tag);
     if (params?.search) qs.set("search", params.search);
+    if (params?.agent) qs.set("agent", params.agent);
     if (params?.limit) qs.set("limit", String(params.limit));
     if (params?.offset) qs.set("offset", String(params.offset));
     const q = qs.toString();
     return apiFetch<ReportsListResponse>(`/api/v1/reports${q ? `?${q}` : ""}`);
   },
 
+  getReport: (id: string) =>
+    apiFetch<ReportSummary>(`/api/v1/reports/${encodeURIComponent(id)}`),
+
   getReportsGrouped: () => apiFetch<ReportGroup[]>("/api/v1/reports/latest-by-source"),
+
+  /**
+   * A report's rendered HTML body.
+   *
+   * Report bodies are authenticated (SEC-112), and an iframe `src` cannot carry
+   * an Authorization header — so callers fetch the HTML here and hand it to the
+   * iframe as `srcDoc`, keeping the token in a header instead of the URL.
+   */
+  getReportHtml: async (id: string): Promise<string> => {
+    const res = await authFetch(`/api/v1/reports/${encodeURIComponent(id)}/html`);
+    if (!res.ok) throw new Error(`Failed to load report (${res.status})`);
+    return res.text();
+  },
 
   deleteReport: (id: string) =>
     apiFetch<{ deleted: boolean }>(`/api/v1/reports/${encodeURIComponent(id)}`, { method: "DELETE" }),
@@ -1330,6 +1997,52 @@ export const api = {
   getGatewayLogs: (server: string) =>
     apiFetch<{ logs: string }>(`/api/v1/settings/gateway/logs?server=${encodeURIComponent(server)}`),
 
+  getGatewayNetworks: (server: string) =>
+    apiFetch<{ networks: GatewayNetworkInfo[] }>(
+      `/api/v1/settings/gateway/networks?server=${encodeURIComponent(server)}`,
+    ),
+
+  getGatewayNetworkConfig: (server: string, networkId: string) =>
+    apiFetch<GatewayNetworkConfig>(
+      `/api/v1/settings/gateway/networks/${encodeURIComponent(networkId)}?server=${encodeURIComponent(server)}`,
+    ),
+
+  updateGatewayNetworkConfig: (
+    server: string,
+    networkId: string,
+    config: Record<string, unknown>,
+  ) =>
+    apiFetch<{ updated: boolean; network_id: string }>(
+      `/api/v1/settings/gateway/networks/${encodeURIComponent(networkId)}?server=${encodeURIComponent(server)}`,
+      { method: "POST", body: JSON.stringify({ config }) },
+    ),
+
+  getGatewayWallets: (server: string) =>
+    apiFetch<{ wallets: GatewayWalletGroup[] }>(
+      `/api/v1/settings/gateway/wallets?server=${encodeURIComponent(server)}`,
+    ),
+
+  addGatewayWallet: (
+    server: string,
+    data: { chain: string; private_key: string; set_default?: boolean },
+  ) =>
+    apiFetch<{ added: boolean; chain: string; address: string | null; is_default: boolean }>(
+      `/api/v1/settings/gateway/wallets?server=${encodeURIComponent(server)}`,
+      { method: "POST", body: JSON.stringify(data) },
+    ),
+
+  setDefaultGatewayWallet: (server: string, data: { chain: string; address: string }) =>
+    apiFetch<{ default: boolean }>(
+      `/api/v1/settings/gateway/wallets/default?server=${encodeURIComponent(server)}`,
+      { method: "POST", body: JSON.stringify(data) },
+    ),
+
+  removeGatewayWallet: (server: string, chain: string, address: string) =>
+    apiFetch<{ removed: boolean }>(
+      `/api/v1/settings/gateway/wallets/${encodeURIComponent(chain)}/${encodeURIComponent(address)}?server=${encodeURIComponent(server)}`,
+      { method: "DELETE" },
+    ),
+
   getCredentials: (server: string) =>
     apiFetch<{ credentials: (CredentialInfo | string)[] }>(`/api/v1/settings/credentials?server=${encodeURIComponent(server)}`),
 
@@ -1369,6 +2082,92 @@ export const api = {
 
   // ── Chat ──
 
-  getChatOptions: () =>
-    apiFetch<ChatOptionsResponse>("/api/v1/chat/options"),
+  getOpenRouterModels: () =>
+    apiFetch<{ models: OpenRouterModelOption[] }>("/api/v1/chat/openrouter/models"),
+
+  // ── Sessions (runtime API) ──
+  //
+  // The same sessions the Telegram bot uses: one keyspace, so a session started
+  // there is listed and killable here.
+
+  getSessionOptions: () =>
+    apiFetch<SessionOptionsResponse>("/api/v1/sessions/options"),
+
+  listSessions: () => apiFetch<SessionInfo[]>("/api/v1/sessions"),
+
+  createSession: (spec: CreateSessionRequest) =>
+    apiFetch<SessionInfo>("/api/v1/sessions", {
+      method: "POST",
+      body: JSON.stringify(spec),
+    }),
+
+  destroySession: (key: string) =>
+    apiFetch<{ destroyed: boolean }>(
+      `/api/v1/sessions/${encodeURIComponent(key)}`,
+      { method: "DELETE" },
+    ),
+
+  // Binds the chat to a different brain. The subprocess is replaced, so the
+  // conversation only carries over via `handoff`.
+  switchSession: (key: string, body: SwitchSessionRequest) =>
+    apiFetch<{ ok: boolean; session: SessionInfo }>(
+      `/api/v1/sessions/${encodeURIComponent(key)}/action`,
+      { method: "POST", body: JSON.stringify({ action: "switch", ...body }) },
+    ),
+
+  cancelSessionPrompt: (key: string) =>
+    apiFetch<{ ok: boolean }>(
+      `/api/v1/sessions/${encodeURIComponent(key)}/action`,
+      { method: "POST", body: JSON.stringify({ action: "cancel" }) },
+    ),
+
+  // ── Conversations (durable transcripts) ──
+  //
+  // Everything the user has ever said, across Telegram and the dashboard, in
+  // one keyspace. A conversation is continuable long after its session died.
+
+  listConversations: (limit = 100) =>
+    apiFetch<ConversationMeta[]>(`/api/v1/conversations?limit=${limit}`),
+
+  getConversation: (id: string, limit = 200) =>
+    apiFetch<ConversationDetail>(
+      `/api/v1/conversations/${encodeURIComponent(id)}?limit=${limit}`,
+    ),
+
+  renameConversation: (id: string, title: string) =>
+    apiFetch<ConversationMeta>(`/api/v1/conversations/${encodeURIComponent(id)}`, {
+      method: "PATCH",
+      body: JSON.stringify({ title }),
+    }),
+
+  /** The only way to lose a transcript. Killing a session no longer does. */
+  deleteConversation: (id: string) =>
+    apiFetch<{ deleted: boolean; sessions_destroyed: number }>(
+      `/api/v1/conversations/${encodeURIComponent(id)}`,
+      { method: "DELETE" },
+    ),
+
+  // ── Custom OpenAI-compatible LLM endpoints ──
+
+  getCustomProviders: () =>
+    apiFetch<{ providers: CustomProvider[] }>("/api/v1/settings/custom-providers"),
+
+  /** Validates the endpoint server-side before saving; rejects with the
+   *  provider's own error text (bad key, unreachable host, wrong shape). */
+  addCustomProvider: (data: { base_url: string; api_key?: string; name?: string }) =>
+    apiFetch<{ provider: CustomProvider; models: string[] }>(
+      "/api/v1/settings/custom-providers",
+      { method: "POST", body: JSON.stringify(data) },
+    ),
+
+  getCustomProviderModels: (name: string) =>
+    apiFetch<{ provider: CustomProvider; models: string[] }>(
+      `/api/v1/settings/custom-providers/${encodeURIComponent(name)}/models`,
+    ),
+
+  deleteCustomProvider: (name: string) =>
+    apiFetch<{ deleted: boolean; name: string }>(
+      `/api/v1/settings/custom-providers/${encodeURIComponent(name)}`,
+      { method: "DELETE" },
+    ),
 };

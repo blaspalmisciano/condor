@@ -41,12 +41,18 @@ def _write_skill(
     description="d",
     body="Steps.",
     references_routine=None,
+    shared=False,
 ):
-    """Author a builtin SKILL.md under the right assistant home."""
-    if agent_slug:
-        base = root / "agents" / agent_slug / "skills"
+    """Author a builtin SKILL.md under the right library.
+
+    ``shared`` publishes the playbook to every assistant (FEAT-031). Publication
+    is the DIRECTORY, not a flag: a shared playbook lives in
+    ``agents/_shared/skills`` and ``agent_slug`` is therefore ignored for it.
+    """
+    if shared:
+        base = root / "agents" / "_shared" / "skills"
     else:
-        base = root / "assistants" / "condor" / "skills"
+        base = root / "agents" / (agent_slug or "condor") / "skills"
     d = base / slug
     d.mkdir(parents=True, exist_ok=True)
     fm = [
@@ -58,6 +64,7 @@ def _write_skill(
     if references_routine:
         fm.append(f"references_routine: {references_routine}")
     (d / "SKILL.md").write_text("---\n" + "\n".join(fm) + "\n---\n\n" + body + "\n")
+    return d
 
 
 def test_read_returns_builtin_with_flag(project_root, fake_routines):
@@ -269,12 +276,18 @@ def test_write_file_creates_and_overwrites_companion(project_root):
     assert res["created"] is True
     assert res["skill"] == "pmm_playbook"
     assert res["files"] == ["config_aggressive.md"]
-    assert s.read_file("pmm_playbook", "config_aggressive.md")["content"] == "tight spreads"
+    assert (
+        s.read_file("pmm_playbook", "config_aggressive.md")["content"]
+        == "tight spreads"
+    )
 
     # Second write to the same name overwrites (created flips to False).
     res2 = s.write_file("pmm_playbook", "config_aggressive.md", "wider spreads")
     assert res2["created"] is False
-    assert s.read_file("pmm_playbook", "config_aggressive.md")["content"] == "wider spreads"
+    assert (
+        s.read_file("pmm_playbook", "config_aggressive.md")["content"]
+        == "wider spreads"
+    )
 
 
 def test_write_file_missing_skill_errors(project_root):
@@ -298,6 +311,238 @@ def test_write_file_rejects_skill_md_and_traversal(project_root):
     assert not (s.skills_dir / "secret.md").exists()
 
 
+# ── the shared library: Condor publishes, everyone reads (FEAT-031) ──
+
+
+def test_agent_inherits_a_shared_chat_skill(project_root):
+    """A published playbook resolves for an agent, flagged inherited."""
+    _write_skill(
+        project_root,
+        None,
+        "routine_cookbook",
+        when_to_use="before writing a routine",
+        body="The cookbook.",
+        shared=True,
+    )
+    agent = SkillStore("backpack_mm")
+
+    read = agent.read("routine_cookbook")
+    assert read is not None
+    assert read["inherited"] is True
+    assert "The cookbook." in read["body"]
+    assert "[routine_cookbook] before writing a routine" in agent.list_index()
+    assert [h["name"] for h in agent.search("cookbook")] == ["routine_cookbook"]
+
+
+def test_unpublished_chat_skill_is_not_found_for_an_agent(project_root):
+    """Unpublished is INVISIBLE, not merely unlisted — it is not on any path
+    the agent reads, so there is no body to serve."""
+    _write_skill(project_root, None, "agent_builder", when_to_use="build an agent")
+    agent = SkillStore("backpack_mm")
+
+    assert agent.read("agent_builder") is None
+    assert "agent_builder" not in agent.list_index()
+    assert agent.search("build an agent") == []
+    assert "error" in agent.read_file("agent_builder", "x.md")
+
+
+def test_chat_reads_the_shared_library_as_its_publisher(project_root):
+    """The chat reads shared skills like everyone — but may WRITE them."""
+    _write_skill(project_root, None, "published", when_to_use="x", shared=True)
+    chat = SkillStore()
+
+    read = chat.read("published")
+    assert read["shared"] is True
+    # Not `inherited`: the chat can publish, so edit/delete are open to it.
+    assert "inherited" not in read
+    assert chat.list_index().count("[published]") == 1  # not listed twice
+    assert chat.edit("published", body="revised")["body"] == "revised"
+
+
+def test_agent_sees_shared_as_both_shared_and_inherited(project_root):
+    """`shared` names the library; `inherited` says you cannot write it."""
+    _write_skill(project_root, None, "published", when_to_use="x", shared=True)
+
+    read = SkillStore("backpack_mm").read("published")
+    assert read["shared"] is True
+    assert read["inherited"] is True
+
+
+def test_local_skill_shadows_the_inherited_one(project_root):
+    """Own library wins — that is how an agent specializes a playbook."""
+    _write_skill(
+        project_root,
+        None,
+        "routine_cookbook",
+        when_to_use="chat trigger",
+        body="chat body",
+        shared=True,
+    )
+    _write_skill(
+        project_root,
+        "backpack_mm",
+        "routine_cookbook",
+        when_to_use="agent trigger",
+        body="agent body",
+    )
+    agent = SkillStore("backpack_mm")
+
+    read = agent.read("routine_cookbook")
+    assert read["body"] == "agent body"
+    assert "inherited" not in read
+    index = agent.list_index()
+    assert "agent trigger" in index
+    assert "chat trigger" not in index
+    assert index.count("[routine_cookbook]") == 1
+    assert [h["body"] for h in agent.search("body")] == ["agent body"]
+    # Condor's file on disk is untouched.
+    assert SkillStore().read("routine_cookbook")["body"] == "chat body"
+
+
+def test_inherited_companion_file_is_readable(project_root):
+    """Progressive disclosure survives the inherited root."""
+    d = _write_skill(
+        project_root, None, "routine_cookbook", when_to_use="x", shared=True
+    )
+    (d / "report_builder.md").write_text("ReportBuilder patterns")
+
+    agent = SkillStore("backpack_mm")
+    assert agent.read("routine_cookbook")["files"] == ["report_builder.md"]
+    res = agent.read_file("routine_cookbook", "report_builder.md")
+    assert res["content"] == "ReportBuilder patterns"
+
+
+def test_inherited_companion_read_still_rejects_traversal(project_root):
+    """The traversal guard anchors on the RESOLVED dir, the shared one included."""
+    _write_skill(project_root, None, "routine_cookbook", when_to_use="x", shared=True)
+    _write_skill(
+        project_root, None, "agent_builder", when_to_use="private", shared=True
+    )
+    # Plant the bait in the shared root — the dir the agent actually resolves
+    # against — so `../` has something real to reach for.
+    shared_root = SkillStore("backpack_mm").shared_dir
+    (shared_root / "secret.md").write_text("top secret")
+
+    agent = SkillStore("backpack_mm")
+    for bad in (
+        "../secret.md",
+        "../agent_builder/SKILL.md",
+        "..%2fsecret.md",
+        "/etc/passwd",
+        "sub/x.md",
+        "SKILL.md",
+    ):
+        res = agent.read_file("routine_cookbook", bad)
+        assert "error" in res, bad
+        assert "content" not in res, bad
+
+
+def test_writes_to_an_inherited_skill_are_refused(project_root):
+    """edit/delete/write_file on an inherited-only slug error and write nothing."""
+    d = _write_skill(
+        project_root,
+        None,
+        "routine_cookbook",
+        when_to_use="chat trigger",
+        body="chat body",
+        shared=True,
+    )
+    agent = SkillStore("backpack_mm")
+
+    for res in (
+        agent.edit("routine_cookbook", body="hijacked"),
+        agent.delete("routine_cookbook"),
+        agent.write_file("routine_cookbook", "new.md", "hijacked"),
+    ):
+        assert "error" in res
+        assert "read-only" in res["error"]
+        assert "Create a local skill" in res["error"]
+
+    # Condor's library is intact: body unchanged, no companion planted.
+    assert (d / "SKILL.md").read_text().count("chat body") == 1
+    assert not (d / "new.md").exists()
+    assert SkillStore().read("routine_cookbook")["body"] == "chat body"
+
+
+def test_create_shadows_an_inherited_skill_locally(project_root):
+    """create() is the sanctioned way to specialize: it writes to the OWN dir."""
+    _write_skill(
+        project_root,
+        None,
+        "routine_cookbook",
+        when_to_use="chat",
+        body="chat body",
+        shared=True,
+    )
+    agent = SkillStore("backpack_mm")
+
+    res = agent.create("routine_cookbook", "mine", "my trigger", "my body")
+    assert res["saved"] is True
+    assert "shared" not in res  # an agent cannot publish
+    assert agent.read("routine_cookbook")["body"] == "my body"
+    assert SkillStore().read("routine_cookbook")["body"] == "chat body"
+    # Now that it is local, editing it works again.
+    assert agent.edit("routine_cookbook", body="edited")["body"] == "edited"
+
+
+def test_publishing_is_chat_only_and_survives_overwrite(project_root):
+    """shared=True publishes from the chat, is ignored for an agent, and sticks."""
+    chat = SkillStore()
+    assert chat.create("cookbook", "d", "w", "body", shared=True)["shared"] is True
+    assert SkillStore("backpack_mm").read("cookbook") is not None
+
+    # Re-creating without the flag must not silently unpublish it.
+    chat.create("cookbook", "d2", "w2", "body2")
+    assert SkillStore("backpack_mm").read("cookbook")["body"] == "body2"
+
+    # Explicit unpublish takes it back out of every agent's reach.
+    chat.edit("cookbook", shared=False)
+    assert SkillStore("backpack_mm").read("cookbook") is None
+
+    # An agent flagging its own skill publishes nothing.
+    agent = SkillStore("brigado")
+    assert "shared" not in agent.create("local", "d", "w", "b", shared=True)
+    assert SkillStore("backpack_mm").read("local") is None
+
+
+def test_the_shared_library_is_not_an_agent():
+    """`agents/_shared` must never be discovered as an agent.
+
+    The shared library lives under `agents/` for locality, so the whole design
+    rests on the `_` prefix keeping it out of the registry — otherwise it would
+    show up in agent pickers, `list_agents`, and routine ownership.
+    """
+    from condor.agents.agent import AgentStore
+    from condor.memory.paths import shared_skills_root
+
+    assert shared_skills_root().parent.name.startswith("_")
+    store = AgentStore()
+    assert store.get("_shared") is None
+    assert "_shared" not in [a.slug for a in store.list_all()]
+
+
+def test_publishing_moves_the_folder_with_its_companions(project_root):
+    """Publish/unpublish RELOCATES the skill — it never leaves a second copy.
+
+    A stale copy in the chat's own library would shadow the published one and
+    quietly undo the publish, so the move is what makes the directory the whole
+    truth about who can see a playbook.
+    """
+    chat = SkillStore()
+    chat.create("cookbook", "d", "w", "body")
+    chat.write_file("cookbook", "tpl.md", "template")
+    own, shared = chat.skills_dir / "cookbook", chat.shared_dir / "cookbook"
+    assert own.exists() and not shared.exists()
+
+    chat.create("cookbook", "d", "w", "body", shared=True)
+    assert shared.exists() and not own.exists()
+    assert (shared / "tpl.md").read_text() == "template"  # companion travelled
+
+    chat.edit("cookbook", shared=False)
+    assert own.exists() and not shared.exists()
+    assert (own / "tpl.md").read_text() == "template"
+
+
 def test_create_requires_all_fields(project_root):
     err = SkillStore().create("only_name", "", "", "")
     assert "error" in err
@@ -317,14 +562,17 @@ def test_atomic_write_uses_unique_tmp_per_writer(project_root, monkeypatch):
     target = s.skills_dir / "one" / "SKILL.md"
     target.parent.mkdir(parents=True, exist_ok=True)
 
-    orig = Path.write_text
+    # Observed at the rename, not at the write call, so the assertion survives
+    # any change of write mechanism inside condor.fsutil (ARCH-148).
+    import os
 
-    def spy(self, text, *args, **kwargs):
-        if self.name.endswith(".tmp"):
-            seen.append(self.name)
-        return orig(self, text, *args, **kwargs)
+    orig = os.replace
 
-    monkeypatch.setattr(Path, "write_text", spy)
+    def spy(src, dst):
+        seen.append(os.path.basename(src))
+        return orig(src, dst)
+
+    monkeypatch.setattr(os, "replace", spy)
     _atomic_write(target, "a")
     _atomic_write(target, "b")
 

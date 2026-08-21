@@ -14,7 +14,7 @@ def memory_root(tmp_path, monkeypatch):
     """Point the project root at a tmp dir so stores resolve under it."""
     monkeypatch.setattr(paths_module, "_PROJECT_ROOT", tmp_path)
     # The chat store (agent_slug=None) is what these per-user tests exercise.
-    return tmp_path / "assistants" / "condor" / "store"
+    return tmp_path / "agents" / "condor" / "store"
 
 
 def test_write_list_read_roundtrip(memory_root):
@@ -194,14 +194,17 @@ def test_atomic_write_uses_unique_tmp_per_writer(memory_root, monkeypatch):
     target = s.memories_dir / "one.md"
     target.parent.mkdir(parents=True, exist_ok=True)
 
-    orig = Path.write_text
+    # Observed at the rename, not at the write call, so the assertion survives
+    # any change of write mechanism inside condor.fsutil (ARCH-148).
+    import os
 
-    def spy(self, text, *args, **kwargs):
-        if self.name.endswith(".tmp"):
-            seen.append(self.name)
-        return orig(self, text, *args, **kwargs)
+    orig = os.replace
 
-    monkeypatch.setattr(Path, "write_text", spy)
+    def spy(src, dst):
+        seen.append(os.path.basename(src))
+        return orig(src, dst)
+
+    monkeypatch.setattr(os, "replace", spy)
     _atomic_write(target, "a")
     _atomic_write(target, "b")
 
@@ -254,7 +257,7 @@ def test_resolver_distinct_roots_per_assistant(tmp_path, monkeypatch):
     grid = store_root(42, "grid_scalper")
     ema = store_root(42, "ema_trend_follower")
     assert chat != grid != ema
-    assert chat == tmp_path / "assistants" / "condor" / "store" / "user_42"
+    assert chat == tmp_path / "agents" / "condor" / "store" / "user_42"
     assert grid == tmp_path / "agents" / "grid_scalper" / "store" / "user_42"
     # Same (slug, user) is stable across calls.
     assert store_root(42, "grid_scalper") == grid

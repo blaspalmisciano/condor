@@ -65,13 +65,17 @@ def test_attribution_resets_after_block(reports_dir):
     assert rep.list_reports()[0][0]["agent"] == "condor"
 
 
-def test_mcp_runner_stamps_bare_agent_slug_for_strategy(
+def test_mcp_runner_sends_bare_agent_slug_for_strategy(
     reports_dir, tmp_path, monkeypatch
 ):
     """The MCP routine runner must attribute a strategy's report to the bare
     owning-agent slug, not the composite ``"{agent}.{strategy}"`` key — so it
     lands in the same ``list_reports(agent=...)`` bucket as the web/Telegram
-    runner (which uses the bare slug). Regression test for CORR-027."""
+    runner (which uses the bare slug). Regression test for CORR-027.
+
+    Since FEAT-028 the runner does not execute the routine itself: it hands the
+    run to the main process, so the slug is asserted on the wire (``attribute_to``
+    on ``POST /routines/run``) instead of on the produced report."""
     import condor.agents.strategy as strategy_mod
     import routines.base as routines_base
     from mcp_servers.condor.tools import routines as mcp_routines
@@ -104,9 +108,112 @@ def test_mcp_runner_stamps_bare_agent_slug_for_strategy(
         "    return 'done'\n"
     )
 
-    asyncio.run(mcp_routines.run_routine("probe", {}, strategy_id=strategy.key))
+    posted = {}
 
-    # Report is bucketed under the bare slug, not the composite key.
-    bare, _ = rep.list_reports(agent="market_making_expert")
-    assert [e["title"] for e in bare] == ["Probe report"]
-    assert rep.list_reports(agent=strategy.key)[0] == []
+    async def fake_call(method, path, body=None, timeout=None):
+        if method == "POST":
+            posted.update(body)
+            return {"instance_id": "inst-1"}
+        return {"status": "completed", "result_text": "done"}
+
+    monkeypatch.setattr(mcp_routines, "call_main_api", fake_call)
+    monkeypatch.setattr(mcp_routines.settings, "active_server", "srv")
+    monkeypatch.setattr(mcp_routines, "_POLL_INTERVAL", 0)
+
+    # A composite strategy key is still accepted and resolves to its owning agent.
+    asyncio.run(mcp_routines.run_routine("probe", {}, target=strategy.key))
+
+    # Attributed to the bare slug, not the composite key.
+    assert posted["attribute_to"] == "market_making_expert"
+    assert posted["routine_name"] == "market_making_expert/probe"
+
+
+def _report_writing_routine(source: str):
+    """A minimal routine object shaped like RoutineInfo, producing one report."""
+    from types import SimpleNamespace
+
+    from pydantic import BaseModel
+
+    class Config(BaseModel):
+        pass
+
+    async def run(config, ctx):
+        b = rep.ReportBuilder("Store report")
+        b.source("routine", "probe")
+        b.markdown("body")
+        await b.save()
+        return "done"
+
+    return SimpleNamespace(name="probe", source=source, config_class=Config, run_fn=run)
+
+
+def _run_in_store(routine, **kwargs) -> None:
+    from condor.routine_store import RoutineStore
+
+    store = RoutineStore()
+    store._instances["i1"] = store._new_instance_meta(
+        "probe", {}, "srv", 0, source="web"
+    )
+    asyncio.run(
+        store._execute_and_record(
+            "i1",
+            routine,
+            {},
+            "srv",
+            status_after="completed",
+            fire_hooks=False,
+            **kwargs,
+        )
+    )
+
+
+def test_store_run_defaults_attribution_to_the_routines_source(reports_dir):
+    """Web/Telegram callers omit ``agent`` and keep deriving it from the file."""
+    _run_in_store(_report_writing_routine("agent:market_making_expert"))
+    assert rep.list_reports()[0][0]["agent"] == "market_making_expert"
+
+
+def _sourceless_routine(name: str = "probe"):
+    """A routine that saves a report without ever calling ``.source()``."""
+    from types import SimpleNamespace
+
+    from pydantic import BaseModel
+
+    class Config(BaseModel):
+        pass
+
+    async def run(config, ctx):
+        b = rep.ReportBuilder("Sourceless report")
+        b.markdown("body")
+        await b.save()
+        return "done"
+
+    return SimpleNamespace(name=name, source="global", config_class=Config, run_fn=run)
+
+
+def test_store_run_stamps_the_source_when_the_routine_forgot_it(reports_dir):
+    """Without this the report is invisible on the Routines page: the per-routine
+    lookup matches on source_name and the grouped list skips empty ones."""
+    _run_in_store(_sourceless_routine())
+    entry = rep.list_reports()[0][0]
+    assert (entry["source_type"], entry["source_name"]) == ("routine", "probe")
+
+
+def test_store_run_uses_the_bare_name_for_an_agent_routine(reports_dir):
+    """Agent routines are discovered prefixed; reports keep the bare name."""
+    _run_in_store(_sourceless_routine("directional_trader/ema_research_charts"))
+    assert rep.list_reports()[0][0]["source_name"] == "ema_research_charts"
+
+
+def test_explicit_source_wins_over_the_default(reports_dir):
+    routine = _report_writing_routine("global")  # its report says source "probe"
+    routine.name = "renamed_file"
+    _run_in_store(routine)
+    assert rep.list_reports()[0][0]["source_name"] == "probe"
+
+
+def test_store_run_honors_an_explicit_agent(reports_dir):
+    """An agent running a routine from the general library keeps its own name:
+    the source says "global" (-> condor) but the caller knows better."""
+    _run_in_store(_report_writing_routine("global"), agent="market_making_expert")
+    assert rep.list_reports()[0][0]["agent"] == "market_making_expert"

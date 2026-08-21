@@ -168,6 +168,7 @@ condor_bot_data.pickle.bak
 
 # Local config and data
 config.yml
+config.yml.bak
 audit_log.yml
 data/
 
@@ -181,3 +182,17 @@ node_modules/
 reports/
 /improvements/
 /features/
+
+# Routine reports
+/reports/
+
+# Runtime store: loop scratch state (FEAT-013) and chat transcripts (FEAT-015).
+# Durable across restarts, but it is this deployment's data, not the codebase's.
+condor/.runtime/
+
+# Agent runtime artifacts: learnings, session journals, dry-run experiments,
+# and delegation records (not committed)
+agents/**/learnings.md
+agents/**/sessions/
+agents/**/dry_runs/
+agents/**/delegations/

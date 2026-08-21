@@ -3,6 +3,7 @@ import importlib
 import logging
 import os
 import sys
+from functools import partial
 from pathlib import Path
 from urllib.parse import urlparse
 
@@ -14,11 +15,13 @@ from telegram.ext import (
     CommandHandler,
     ContextTypes,
     MessageHandler,
+    TypeHandler,
     filters,
 )
 
 from condor.persistence import SafePicklePersistence
-from handlers import clear_all_input_states
+from condor.telemetry import taps as telemetry_taps
+from handlers import cancel_command, clear_all_input_states
 from utils.auth import restricted
 from utils.config import TELEGRAM_TOKEN, WEB_PORT, WEB_URL
 
@@ -238,7 +241,9 @@ def reload_handlers():
         "handlers.routines",
         "handlers.agents",
         "handlers.agents.menu",
-        "handlers.agents.session",
+        # NOTE: no "condor.runtime.*" module belongs in this list. The runtime
+        # holds live subprocess handles (agent sessions); re-executing those
+        # modules resets the registry and silently orphans every running agent.
         "handlers.agents.stream",
         "handlers.agents.confirmation",
         "handlers.agents._shared",
@@ -273,6 +278,7 @@ def register_handlers(application: Application) -> None:
         agent_callback_handler,
         agent_command,
         agent_voice_handler,
+        stop_command,
     )
     from handlers.bots import (
         bots_callback_handler,
@@ -297,6 +303,13 @@ def register_handlers(application: Application) -> None:
     # Clear existing handlers
     application.handlers.clear()
 
+    # Usage telemetry observer (FEAT-023). PTB dispatches every update to every
+    # group, so one handler in group -1 sees every command and every callback
+    # without touching a single handler below. It only reads — it must never
+    # call into @restricted, or observing would become an authorization side
+    # effect — and it is a no-op unless the admin opted in.
+    application.add_handler(TypeHandler(Update, telemetry_taps.telegram_tap), group=-1)
+
     # Add command handlers
     application.add_handler(CommandHandler("start", start))
     application.add_handler(CommandHandler("portfolio", portfolio_command))
@@ -313,8 +326,14 @@ def register_handlers(application: Application) -> None:
     application.add_handler(CommandHandler("stop", stop_command))
     application.add_handler(CommandHandler("executors", executors_command))
     application.add_handler(CommandHandler("agent", agent_command))
+    # Interrupts the answer in flight without touching the session — the
+    # dashboard's Stop button, for a surface that has no buttons while streaming.
+    application.add_handler(CommandHandler("stop", stop_command))
     application.add_handler(CommandHandler("delegations", delegations_command))
     application.add_handler(CommandHandler("memory", memory_command))
+    # Universal escape hatch for flows that arm a "next message is the answer"
+    # input mode. Every such prompt advertises /cancel.
+    application.add_handler(CommandHandler("cancel", cancel_command))
 
     # Add configuration commands (direct access)
     application.add_handler(CommandHandler("servers", servers_command))
@@ -376,6 +395,16 @@ def register_handlers(application: Application) -> None:
         CallbackQueryHandler(volume_alert_callback, pattern="^volalert:")
     )
 
+    # Telemetry consent prompt (FEAT-023): three buttons, admin only
+    from condor.telemetry import prompt as telemetry_prompt
+
+    application.add_handler(
+        CallbackQueryHandler(
+            telemetry_prompt.callback_handler,
+            pattern=f"^{telemetry_prompt.CALLBACK_PREFIX}:",
+        )
+    )
+
     # Add callback query handler for portfolio settings
     application.add_handler(get_portfolio_callback_handler())
 
@@ -414,7 +443,7 @@ async def sync_server_permissions() -> None:
 async def register_bot_commands(application: Application) -> None:
     """Register the Telegram command menus (public for everyone, admin overlay).
 
-    Extracted from ``post_init`` so it can also run on hot-reload — otherwise a
+    Extracted from ``startup`` so it can also run on hot-reload — otherwise a
     newly added command (e.g. /delegations) gets its dispatch handler reloaded
     but never shows up in the menu until a full process restart.
     """
@@ -449,11 +478,12 @@ async def register_bot_commands(application: Application) -> None:
     # 1) Public commands — registered by default for ALL users (default scope is
     #    the universal fallback every user resolves to unless a more specific
     #    scope overrides it). Wrapped independently so a transient failure here
-    #    never blocks the admin step (or the rest of post_init) from running.
+    #    never blocks the admin step (or the rest of startup) from running.
     commands = [
         BotCommand("start", "Welcome message and setup"),
         BotCommand("portfolio", "View balances across exchanges"),
         BotCommand("agent", "AI trading assistant"),
+        BotCommand("stop", "Stop the answer being generated"),
         BotCommand("delegations", "Monitor background agent tasks"),
         BotCommand("memory", "Review what the assistant remembers about you"),
         BotCommand("executors", "Deploy and manage trading executors"),
@@ -466,6 +496,7 @@ async def register_bot_commands(application: Application) -> None:
         BotCommand("keys", "Configure exchange API credentials"),
         BotCommand("gateway", "Gateway for DEX trading"),
         BotCommand("web", "Open the web dashboard"),
+        BotCommand("cancel", "Abort the current input flow"),
     ]
     try:
         await application.bot.set_my_commands(commands)
@@ -489,8 +520,46 @@ async def register_bot_commands(application: Application) -> None:
             logger.warning(f"Failed to set admin-specific commands: {e}", exc_info=True)
 
 
-async def post_init(application: Application) -> None:
-    """Register bot commands after initialization."""
+async def _notify_interrupted_runs(bot, report) -> None:
+    """Tell each owner, once, what the restart found.
+
+    One summary per chat rather than a message per run: a crash with several
+    live loops would otherwise spam the user at the worst possible moment.
+    """
+    by_chat: dict[int, list] = {}
+    for run in report.interrupted:
+        status = None
+        try:
+            from condor.runtime.registry_file import read_status
+
+            status = read_status(run.session_dir)
+        except Exception:
+            pass
+        chat_id = (status or {}).get("chat_id")
+        if chat_id:
+            by_chat.setdefault(int(chat_id), []).append(run)
+
+    for chat_id, runs in by_chat.items():
+        lines = [f"Found {len(runs)} interrupted run(s) after restart:"]
+        for run in runs:
+            suffix = " — restarted" if run.restarted else ""
+            lines.append(f"• {run.label} (last tick {run.last_tick}){suffix}")
+        try:
+            await bot.send_message(chat_id=chat_id, text="\n".join(lines))
+        except Exception:
+            logger.warning("Could not notify chat %s about interrupted runs", chat_id)
+
+
+async def startup(application: Application) -> None:
+    """Bring the process up: commands, caches, supervisors, boot reconciliation.
+
+    Deliberately *not* wired as PTB's ``post_init``. That hook only fires from
+    ``run_polling``/``run_webhook``, and :func:`_run_dual` drives the lifecycle
+    by hand (``initialize`` → ``start_polling`` → ``start``) so it can run
+    uvicorn alongside the bot. Registering it on the builder would look correct
+    and never run — which is exactly how boot reconciliation silently died.
+    Called explicitly from :func:`_run_dual`, before the first update is served.
+    """
     # Sync server permissions (ensures all servers have ownership entries)
     await sync_server_permissions()
 
@@ -523,18 +592,113 @@ async def post_init(application: Application) -> None:
     sds.start()
     await sds.auto_subscribe_servers()
 
-    # Start agent session health monitor
-    from handlers.agents.session import start_health_monitor
+    # Start agent session health monitor. The health monitor is process
+    # lifecycle, not a session operation, so it is driven off the module
+    # directly rather than through the client facade.
+    from condor.runtime import sessions as runtime_sessions
+    from condor.runtime.confirmations import get_registry
 
-    await start_health_monitor(application.bot)
+    await runtime_sessions.start_health_monitor(application.bot)
+    # Sweeps expired approvals so a request nobody answers is denied, not leaked.
+    await get_registry().start()
+
+    # Settle whatever the previous process left running: mark orphaned loops
+    # interrupted, restart only the ones that opted in, and tell the owner once.
+    from condor.runtime.loops import get_supervisor
+
+    try:
+        report = await get_supervisor().reconcile_boot()
+        if report.total:
+            logger.warning(
+                "Boot reconciliation: %d interrupted, %d restarted",
+                report.total,
+                len(report.restarted),
+            )
+            await _notify_interrupted_runs(application.bot, report)
+    except Exception:
+        logger.exception("Boot reconciliation failed; continuing startup")
 
     # Schedule periodic update checks (notifies admin)
     from handlers.admin.update import schedule_update_checks
 
     schedule_update_checks(application)
 
+    # Usage telemetry (FEAT-023). init() resolves the consent level once so the
+    # taps never read the disk on a hot path, and only materializes the
+    # install's random ids when telemetry is actually on. The jobs are
+    # registered either way and return immediately while consent is absent, so
+    # opting in mid-run works without a restart.
+    from condor import telemetry
+
+    try:
+        level = telemetry.init(hosted=True)
+        telemetry_taps.register_jobs(application)
+        logger.info("Telemetry level: %s", level)
+    except Exception:
+        logger.exception("Telemetry init failed (continuing without it)")
+
     # Start file watcher
     asyncio.create_task(watch_and_reload(application))
+
+
+async def teardown(application: Application) -> None:
+    """Wind the process down: stop supervisors, flush state, close clients.
+
+    The counterpart to :func:`startup`, and not PTB's ``post_shutdown`` for the
+    same reason: ``Application.shutdown()`` does not call that hook either.
+    Called explicitly from :func:`_run_dual`.
+    """
+    from condor.runtime import client as runtime
+    from condor.runtime import sessions as runtime_sessions
+    from condor.runtime.confirmations import get_registry
+
+    await runtime_sessions.stop_health_monitor()
+    await get_registry().stop()
+    await runtime.destroy_all()
+
+    # Stop all trading agents. Graceful stop, deliberately NOT the shutdown
+    # sequence — winding down positions is an emergency action, not what a
+    # restart should do. Each engine records its final state on the way out.
+    from condor.runtime.conversations import flush_all as flush_conversations
+    from condor.runtime.loops import get_supervisor
+    from condor.runtime.state import flush_all
+
+    await get_supervisor().stop_all()
+    # Writes are debounced, so force the last one out on a clean shutdown.
+    flush_all()
+    # A prompt still streaming when the bot went down holds its turn in
+    # memory; write it out rather than losing the last thing that was said.
+    flush_conversations()
+
+    # Stop WebSocket manager
+    from condor.web.ws_manager import get_ws_manager
+
+    get_ws_manager().stop()
+
+    # Stop ServerDataService
+    from condor.server_data_service import get_server_data_service
+
+    get_server_data_service().stop()
+
+    # Close cached Hummingbot API clients (ConfigManager)
+    from config_manager import get_config_manager
+
+    await get_config_manager().close_all_clients()
+
+    # Close MCP hummingbot client
+    from mcp_servers.hummingbot_api.hummingbot_client import hummingbot_client
+
+    await hummingbot_client.close()
+
+    # Record the clean exit and give the outbox one last chance. Both are no-ops
+    # unless the admin opted in, and neither can fail the shutdown.
+    try:
+        from condor import telemetry
+
+        telemetry.shutdown("signal")
+        await telemetry.flush("teardown")
+    except Exception:
+        logger.debug("Telemetry teardown failed", exc_info=True)
 
 
 async def watch_and_reload(application: Application) -> None:
@@ -549,18 +713,19 @@ async def watch_and_reload(application: Application) -> None:
 
     handlers_path = Path(__file__).parent / "handlers"
     routines_path = Path(__file__).parent / "routines"
-    assistants_path = Path(__file__).parent / "assistants"
+    # ``agents/`` is deliberately NOT watched: AgentStore reads AGENT.md from
+    # disk on every call, so there is no cache to bust (the assistant cache that
+    # justified watching it is gone with FEAT-033), while agents write journals
+    # and strategy state under the same tree — watching it would thrash reloads.
     watch_paths = [handlers_path, routines_path]
-    if assistants_path.exists():
-        watch_paths.append(assistants_path)
     logger.info(f"👀 Watching for changes in: {', '.join(str(p) for p in watch_paths)}")
 
     class _ReloadFilter(DefaultFilter):
-        """Ignore per-assistant runtime stores (FEAT-003).
+        """Ignore per-agent runtime stores (FEAT-003).
 
-        ``assistants/{name}/store/`` is co-located with the watched assistant
-        definitions, so without this every chat memory/skill write would thrash
-        a full handler reload. AGENT.md / *.md changes still trigger reloads.
+        A store can sit under a watched tree (an agent-owned ``routines/`` dir
+        next to its ``store/``), so without this every memory/skill write would
+        thrash a full handler reload.
         """
 
         def __call__(self, change, path: str) -> bool:
@@ -571,12 +736,6 @@ async def watch_and_reload(application: Application) -> None:
     async for changes in awatch(*watch_paths, watch_filter=_ReloadFilter()):
         logger.info(f"📝 Detected changes: {changes}")
         try:
-            # Reload assistants if any .md file in assistants/ changed
-            if any(str(assistants_path) in str(path) for _, path in changes):
-                from handlers.agents._shared import reload_assistants
-
-                reload_assistants()
-                logger.info("✅ Auto-reloaded assistants")
             reload_handlers()
             register_handlers(application)
             # Refresh the Telegram command menus too, so a newly added/removed
@@ -610,9 +769,14 @@ def get_persistence() -> SafePicklePersistence:
 async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Handle errors gracefully."""
     if isinstance(context.error, NetworkError):
+        # Expected and self-healing; reported as an upstream blip, not a bug.
+        telemetry_taps.on_upstream_error("telegram", "poll", "network")
         logger.warning(f"Network error (will retry): {context.error}")
         return
 
+    # Type, a hash of the message, and our own stack frames. Never the message
+    # itself — that is where balances, hostnames and keys leak.
+    telemetry_taps.on_error(context.error, where="telegram", surface="telegram")
     logger.exception("Exception while handling an update:", exc_info=context.error)
 
 
@@ -637,7 +801,7 @@ async def send_to_all(self, message: str, parse_mode: str = "Markdown"):
 def main() -> None:
     """Run the bot."""
     # Reap any ACP/MCP subprocess trees orphaned by a prior hard kill (kill -9,
-    # OOM, power loss) before we spawn our own — those bypass post_shutdown.
+    # OOM, power loss) before we spawn our own — those bypass teardown().
     try:
         from condor.acp.client import reap_stale_acp_trees
 
@@ -651,49 +815,13 @@ def main() -> None:
     # This will save trading context, last used parameters, etc.
     persistence = get_persistence()
 
-    async def post_shutdown(application: Application) -> None:
-        """Clean up agent subprocesses on shutdown."""
-        from handlers.agents.session import destroy_all_sessions, stop_health_monitor
-
-        await stop_health_monitor()
-        await destroy_all_sessions()
-
-        # Stop all trading agents
-        from condor.agents.engine import get_all_engines
-
-        for engine in list(get_all_engines().values()):
-            try:
-                await engine.stop()
-            except Exception:
-                pass
-
-        # Stop WebSocket manager
-        from condor.web.ws_manager import get_ws_manager
-
-        get_ws_manager().stop()
-
-        # Stop ServerDataService
-        from condor.server_data_service import get_server_data_service
-
-        get_server_data_service().stop()
-
-        # Close cached Hummingbot API clients (ConfigManager)
-        from config_manager import get_config_manager
-
-        await get_config_manager().close_all_clients()
-
-        # Close MCP hummingbot client
-        from mcp_servers.hummingbot_api.hummingbot_client import hummingbot_client
-
-        await hummingbot_client.close()
-
-    # Create the Application with persistence enabled
+    # Create the Application with persistence enabled. No post_init/post_shutdown
+    # hooks: they only fire from run_polling/run_webhook, and _run_dual owns the
+    # lifecycle — startup() and teardown() are called there, explicitly.
     application = (
         Application.builder()
         .token(TELEGRAM_TOKEN)
         .persistence(persistence)
-        .post_init(post_init)
-        .post_shutdown(post_shutdown)
         .concurrent_updates(True)
         .build()
     )
@@ -705,7 +833,18 @@ def main() -> None:
     application.add_error_handler(error_handler)
 
     # Run TG bot + web server concurrently in a manual event loop
-    asyncio.run(_run_dual(application))
+    try:
+        asyncio.run(_run_dual(application))
+    finally:
+        # /update asks for a restart by signalling a normal shutdown, so the
+        # re-exec happens here: after the loop is gone and teardown has flushed
+        # state and reaped subprocesses. In a `finally` because a restart is
+        # still the right outcome even if a shutdown step blew up on the way
+        # out. Replacing the image in place keeps the tmux pane alive.
+        from utils.updater import exec_restart, restart_pending
+
+        if restart_pending():
+            exec_restart()  # never returns
 
 
 async def _run_dual(application: Application) -> None:
@@ -717,13 +856,12 @@ async def _run_dual(application: Application) -> None:
     from condor.web.app import create_app
     from condor.web.ws_manager import get_ws_manager
 
-    # Initialize and start the Telegram application.
-    # Note: PTB's `post_init` hook is only auto-invoked by run_polling()/
-    # run_webhook(). Since we manage the lifecycle manually (to co-run the
-    # web server), we have to call it ourselves — otherwise scheduled
-    # routines never get restored after a restart.
+    # Initialize and start the Telegram application. startup() runs between
+    # initialize() and start_polling() — the same slot PTB gives post_init — so
+    # commands, caches and boot reconciliation are settled before the first
+    # update is dispatched.
     await application.initialize()
-    await post_init(application)
+    await startup(application)
     await application.updater.start_polling(allowed_updates=Update.ALL_TYPES)
     await application.start()
 
@@ -746,12 +884,27 @@ async def _run_dual(application: Application) -> None:
 
     if ADMIN_USER_ID:
         try:
+            # Report the version we came up on: after a /update restart this is
+            # the confirmation that the new commit is the one actually running.
+            from utils.updater import get_current_branch, get_local_commit
+
+            branch, commit = await asyncio.gather(
+                get_current_branch(), get_local_commit()
+            )
+            version = f" ({branch} @ {commit})" if commit else ""
             await application.bot.send_message(
                 chat_id=int(ADMIN_USER_ID),
-                text="Condor is online and ready.",
+                text=f"Condor is online and ready.{version}",
             )
         except Exception as e:
             logger.warning(f"Failed to send startup notification to admin: {e}")
+
+        # Ask, once, whether this install wants to be counted (FEAT-023). Sent
+        # next to the boot notification because that is the one moment the admin
+        # is already looking. Until it is answered, nothing is collected.
+        from condor.telemetry.prompt import maybe_prompt_admin
+
+        await maybe_prompt_admin(application.bot)
 
     logger.info("Starting Condor: Telegram bot + web dashboard on port %s", WEB_PORT)
 
@@ -773,8 +926,8 @@ async def _run_dual(application: Application) -> None:
         # Exit on a shutdown signal OR if the web server stops/crashes on its own.
         await asyncio.wait({web_task, stop_task}, return_when=asyncio.FIRST_COMPLETED)
     finally:
-        # Always run teardown — even if the run raised — so post_shutdown
-        # (destroy_all_sessions + engine.stop) reaps every ACP subprocess tree.
+        # Always run teardown — even if the run raised — so it (runtime.destroy_all
+        # + engine.stop) reaps every ACP subprocess tree.
         logger.info("Shutting down...")
         stop_task.cancel()
         server.should_exit = True
@@ -782,12 +935,13 @@ async def _run_dual(application: Application) -> None:
             await web_task
         except Exception:
             logger.exception("Web server crashed during shutdown")
-        # Run each step independently so one failure can't skip the rest —
-        # application.shutdown() is what triggers post_shutdown.
+        # Run each step independently so one failure can't skip the rest.
+        # teardown() runs last, mirroring where post_shutdown would have sat.
         for name, step in (
             ("updater.stop", application.updater.stop),
             ("application.stop", application.stop),
             ("application.shutdown", application.shutdown),
+            ("teardown", partial(teardown, application)),
         ):
             try:
                 await step()

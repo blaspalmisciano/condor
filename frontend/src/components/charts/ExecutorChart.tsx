@@ -2,15 +2,17 @@ import { useEffect, useMemo, useRef, useState, useCallback } from "react";
 import { createPortal } from "react-dom";
 import { useQuery } from "@tanstack/react-query";
 
-import { useCondorWebSocket } from "@/hooks/useWebSocket";
+import { PairLabel } from "@/components/executor/PairLabel";
 import { api, type ExecutorInfo } from "@/lib/api";
 import {
   computeMultiOverlays,
   getExecutorColor,
   getOverlayTimeRange,
+  getPoolAddress,
   type ExecutorOverlay,
 } from "@/lib/executor-overlays";
 import { escapeHtml, formatCompactUsd, tsToSeconds } from "@/lib/formatters";
+import { candlesQuery } from "@/lib/queryClient";
 import { getThemeColors, pnlHexColor, sideColor } from "@/lib/theme-colors";
 
 export interface SnapshotBubble {
@@ -84,18 +86,30 @@ export function ExecutorChart({
   // Determine if any executor is active (for WS subscription)
   const hasActive = executors.some((ex) => isActive(ex.status));
 
-  // WS for non-candle updates (candle streams managed by candleStore)
-  const channels = useMemo(() => [] as string[], []);
-  useCondorWebSocket(channels, server);
+  // No WS here: this chart is REST-only. Its candle data comes from the query
+  // below, and the parent view owns the socket for live executor updates.
 
-  // Pad time range for candle fetch
+  // Pad time range for candle fetch. The window is part of the cache key: the
+  // same market charted over another range (another session) must not reuse it.
   const paddingSeconds = 1800;
-  const startTime = Math.floor(timeRange.start - paddingSeconds);
-  const endTime = Math.ceil(timeRange.end + paddingSeconds);
+  // DEX/LP executors record the pool they traded in; passing it sends the backend
+  // to GeckoTerminal, since these connectors have no CEX candle feed (which is
+  // what surfaced as "Failed to load candles").
+  const poolAddress = useMemo(() => getPoolAddress(executors), [executors]);
+  const { startTime, endTime, queryKey } = candlesQuery(
+    server,
+    connector,
+    tradingPair,
+    interval,
+    timeRange.start - paddingSeconds,
+    timeRange.end + paddingSeconds,
+    poolAddress,
+  );
 
   const { data: candles, isLoading, isError } = useQuery({
-    queryKey: ["candles", server, connector, tradingPair, interval],
-    queryFn: () => api.getCandles(server, connector, tradingPair, interval, 5000, startTime, endTime),
+    queryKey,
+    queryFn: () =>
+      api.getCandles(server, connector, tradingPair, interval, 5000, startTime, endTime, poolAddress),
     enabled: !!server && !!connector && !!tradingPair,
     retry: 1,
   });
@@ -428,10 +442,13 @@ export function ExecutorChart({
     }
   }, [candles, chartReady]);
 
-  // Reset on pair/interval change
+  // Reset on pair/interval change, and when the chart jumps to another time
+  // window (e.g. switching agent sessions) so it refits over the new candles.
+  // Only the start is watched: a live executor pushes `endTime` forward as it
+  // runs, and that must not yank the viewport back from where the user left it.
   useEffect(() => {
     initializedRef.current = false;
-  }, [tradingPair, interval]);
+  }, [tradingPair, interval, startTime]);
 
   // Apply overlays: segments, price lines, markers
   useEffect(() => {
@@ -642,7 +659,7 @@ export function ExecutorChart({
       {/* Header bar */}
       <div className="flex items-center justify-between border-b border-[var(--color-border)] bg-[var(--color-bg)] px-3 py-1.5">
         <p className="text-[10px] text-[var(--color-text-muted)]">
-          {tradingPair} &middot; {interval}
+          <PairLabel tradingPair={tradingPair} connector={connector} /> &middot; {interval}
           {hasActive && (
             <span className="ml-2 inline-block h-1.5 w-1.5 animate-pulse rounded-full bg-emerald-400" />
           )}
