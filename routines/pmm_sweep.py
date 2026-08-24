@@ -39,8 +39,11 @@ class Config(BaseModel):
     window_start: str = Field(default="", description="Explicit window start (ISO UTC or epoch). Use a real run's deploy time to compare vs reality.")
     window_end: str = Field(default="", description="Explicit window end (ISO UTC or epoch).")
     resolution: str = Field(default="1m", description="Backtesting resolution")
-    trade_cost: float = Field(default=0.0, description="Fee fraction for the backtester")
-    rebate_rate: float = Field(default=0.00015, description="Maker rebate fraction; business PnL = total PnL + volume × this")
+    trade_cost: float = Field(default=0.0001, description="Fee fraction for the backtester. Audit P0.3: default was 0.0 (fills are not free); a realistic taker fee is ~1bp. Set 0.0 to reproduce old runs.")
+    rebate_rate: float = Field(default=0.00015, description="Maker rebate fraction; credited only on FUNDED volume in risk_score (audit #3)")
+    risk_w_dd: float = Field(default=1.0, description="Risk-adjusted score weight on |max drawdown| (audit P0.2)")
+    risk_w_uw: float = Field(default=200.0, description="Risk-adjusted score weight on fraction-of-window-underwater (audit P0.2)")
+    oos_fraction: float = Field(default=0.0, description="Walk-forward out-of-sample tail fraction (audit P1.4). 0 = single-window (legacy); e.g. 0.3 selects on the first 70%, gates on the last 30%.")
     max_trials: int = Field(default=40, description="Hard cap on backtests per sweep (server protection)")
     pause_s: float = Field(default=2.0, description="Pause between backtests (the API server also runs live bots)")
     real_db_path: str = Field(default="", description="Optional archived-bot DB path: overlays REAL fills + mark-to-market PnL from its trades")
@@ -231,6 +234,119 @@ def score(t: dict, rebate_rate: float) -> dict:
         "rebates": t["volume"] * rebate_rate,
         "business_pnl": total + t["volume"] * rebate_rate,
     }
+
+
+# ---------------------------------------------------------------------------
+# Truthful scoring & gating (pipeline audit v2 — feat/pipeline-truthful-v2)
+# ---------------------------------------------------------------------------
+# The audit found the legacy business_pnl rewards capital-hungry, inventory-blind
+# quoting under infinite, free, single-tenant capital — nearly orthogonal to live
+# P&L, which is dominated by funding limits and inventory risk. These helpers make
+# selection fee-aware, funding-aware, risk-adjusted, and out-of-sample-validated.
+# `score()` above is kept unchanged for backward comparison.
+
+
+def _time_underwater(t: dict) -> float:
+    """Fraction of the backtest total-PnL curve spent below zero (audit P0.2).
+    A proxy for how long a config sits on an underwater inventory position."""
+    curve = t.get("pnl_curve") or []
+    if not curve:
+        return 0.0
+    return sum(1 for _, v in curve if v < 0) / len(curve)
+
+
+def risk_score(t: dict, rebate_rate: float, *, w_dd: float = 1.0, w_uw: float = 200.0,
+               funded_fraction: float = 1.0, taker_fee: float = 0.0) -> dict:
+    """Inventory-risk-adjusted, fee/funding-corrected score (audit P0.2/P0.3/#3).
+
+        risk_adj_pnl = realized_after_fees + unrealized
+                       + rebate_rate * (funded_fraction * volume)   # no phantom rebates
+                       - w_dd * |max_dd|                            # drawdown penalty
+                       - w_uw * time_underwater                     # inventory-hold penalty
+
+    Rebates credited only on the volume the shared wallet can actually fund
+    (audit #3). A taker-fee haircut removes the free-fills assumption (P0.3).
+    max_dd + time_underwater demote the stuck-long / big-swing configs that drove
+    the live losses (audit #4). The |end_base_pct − target| term from the audit is
+    omitted: base-pct is not in cached trial results — documented limitation."""
+    ff = max(0.0, min(1.0, funded_fraction))
+    realized = t["realized"] - t["volume"] * taker_fee
+    total = realized + t["unrealized"]
+    rebates = t["volume"] * ff * rebate_rate
+    business = total + rebates
+    pen_dd = w_dd * abs(t.get("max_dd") or 0.0)
+    pen_uw = w_uw * _time_underwater(t)
+    return {
+        "total_pnl": total, "rebates": rebates, "business_pnl": business,
+        "pen_dd": pen_dd, "pen_uw": pen_uw, "time_underwater": _time_underwater(t),
+        "funded_fraction": ff, "risk_adj_pnl": business - pen_dd - pen_uw,
+    }
+
+
+def two_sided_quote_need(total_amount_quote: float, target_base_pct):
+    """Quote(cash) and base(valued in quote) a two-sided maker must hold at its
+    target inventory (audit P0.1). Returns (quote_need, base_need_in_quote)."""
+    tb = 0.5 if target_base_pct is None else max(0.0, min(1.0, float(target_base_pct)))
+    return total_amount_quote * (1 - tb), total_amount_quote * tb
+
+
+def fits_budget(candidate_amounts, avail_quote: float, avail_base_quote: float,
+                committed_quote: float = 0.0, committed_base_quote: float = 0.0) -> dict:
+    """Aggregate two-sided requirement of a candidate set vs the SHARED wallet
+    (audit P0.1). candidate_amounts = [(total_amount_quote, target_base_pct), ...].
+    committed_* = requirement already locked by other live controllers."""
+    need_q, need_b = committed_quote, committed_base_quote
+    for amt, tb in candidate_amounts:
+        q, b = two_sided_quote_need(amt, tb)
+        need_q += q
+        need_b += b
+    return {
+        "quote_need": need_q, "quote_avail": avail_quote, "quote_ok": need_q <= avail_quote,
+        "base_need": need_b, "base_avail": avail_base_quote, "base_ok": need_b <= avail_base_quote,
+        "fits": need_q <= avail_quote and need_b <= avail_base_quote,
+    }
+
+
+def autosize_amount(n_controllers: int, target_base_pct, avail_quote: float,
+                    avail_base_quote: float, committed_quote: float = 0.0,
+                    committed_base_quote: float = 0.0, safety: float = 0.8) -> float:
+    """Largest uniform total_amount_quote so a set of n two-sided controllers fits
+    the wallet's scarcer side, times a safety margin (audit P0.1 / P2 auto-sizing)."""
+    tb = 0.5 if target_base_pct is None else max(0.01, min(0.99, float(target_base_pct)))
+    free_q = max(0.0, avail_quote - committed_quote)
+    free_b = max(0.0, avail_base_quote - committed_base_quote)
+    by_quote = free_q / (n_controllers * (1 - tb)) if n_controllers and tb < 1 else float("inf")
+    by_base = free_b / (n_controllers * tb) if n_controllers and tb > 0 else float("inf")
+    return safety * min(by_quote, by_base)
+
+
+def wf_split(w0: int, w1: int, oos_fraction: float = 0.3):
+    """Chronological train/test split for walk-forward validation (audit P1.4).
+    Returns ((train0,train1),(test0,test1)). Backtest each trial on both windows."""
+    f = max(0.05, min(0.9, oos_fraction))
+    cut = int(w0 + (w1 - w0) * (1 - f))
+    return (w0, cut), (cut, w1)
+
+
+def promotion_gate(train_metric: float, test_metric: float, budget_ok: bool,
+                   min_test: float = 0.0, max_decay: float = 0.5) -> dict:
+    """Deploy gate (audit P1): promote only if the edge survives out-of-sample
+    (test ≥ min_test and doesn't decay more than max_decay vs train) AND the set
+    fits the wallet. Blocks in-sample-overfit and unfundable picks."""
+    oos_ok = test_metric >= min_test and (
+        train_metric <= 0 or test_metric >= train_metric * (1 - max_decay))
+    return {"oos_ok": oos_ok, "budget_ok": budget_ok, "promote": bool(oos_ok and budget_ok),
+            "train": train_metric, "test": test_metric}
+
+
+def calibration_trust(real_pnl: float, bt_pnl: float, real_vol: float, bt_vol: float) -> dict:
+    """Live-vs-backtest calibration (audit P1.5). Turns fetch_real from display-only
+    into a scored trust in [0,1]: how well a config's live result tracks its backtest.
+    Feed the divergence back as a fill/PnL haircut so each cycle gets more predictive."""
+    pnl_ratio = (real_pnl / bt_pnl) if bt_pnl else 0.0
+    vol_ratio = (real_vol / bt_vol) if bt_vol else 0.0
+    trust = max(0.0, min(1.0, 1 - abs(1 - vol_ratio))) * (1.0 if pnl_ratio > 0 else 0.3)
+    return {"pnl_ratio": pnl_ratio, "vol_ratio": vol_ratio, "trust": round(trust, 3)}
 
 
 # ---------------------------------------------------------------------------
@@ -625,6 +741,37 @@ async def build_report(cfg: Config, base_cfg: dict, trials: list[dict], candles:
     b.table(rank_rows(by_vol), columns=cols)
     b.markdown("### 💰 Top 5 — Total PnL")
     b.table(rank_rows(by_pnl), columns=cols)
+
+    # Risk-adjusted ranking (audit P0.2): the ranking that actually correlated
+    # with live results — penalises drawdown + time-underwater, rebates only on
+    # funded volume, fee-aware. Prefer THIS over Business/Volume for deploy picks.
+    for t in ok:
+        t["_risk"] = risk_score(t, cfg.rebate_rate, w_dd=cfg.risk_w_dd,
+                                w_uw=cfg.risk_w_uw, taker_fee=cfg.trade_cost)
+    by_risk = sorted(ok, key=lambda t: -t["_risk"]["risk_adj_pnl"])[:5]
+
+    def risk_rows(ranked):
+        rows = []
+        for i, t in enumerate(ranked, 1):
+            r = t["_risk"]
+            rows.append({
+                "#": str(i), "Variant": _tlabel(t, axes),
+                "Risk-adj PnL": f"{r['risk_adj_pnl']:+,.1f}",
+                "Business PnL": f"{r['business_pnl']:+,.1f}",
+                "|MaxDD| pen": f"{r['pen_dd']:,.0f}",
+                "Underwater": f"{r['time_underwater']*100:.0f}%",
+                "Volume": f"{t['volume']:,.0f}",
+            })
+        return rows
+
+    b.markdown(
+        "### 🛡️ Top 5 — Risk-adjusted PnL (audit P0.2)\n"
+        "_PnL − w·|maxDD| − w·time-underwater; rebates on funded volume only; "
+        "fee-aware. This is the deploy-selection metric; Business/Volume above are "
+        "diagnostic. A shared-wallet budget gate (`fits_budget`) must still pass "
+        "before deploy — see the pipeline proposal._")
+    b.table(risk_rows(by_risk),
+            columns=["#", "Variant", "Risk-adj PnL", "Business PnL", "|MaxDD| pen", "Underwater", "Volume"])
 
     # Curve set: BASE + top-3 by Total PnL + top-3 by Volume (deduped), each
     # labeled with its rank badges (P# = PnL rank, V# = volume rank).
