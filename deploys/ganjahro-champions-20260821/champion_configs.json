@@ -1,0 +1,272 @@
+{
+ "btcbrl-ganjahro-1__toppnl": {
+  "buy_amounts_pct": [
+   1
+  ],
+  "buy_cooldown_time": 10,
+  "buy_position_effectivization_time": 300,
+  "buy_spreads": [
+   7.500000000000001e-05
+  ],
+  "connector_name": "binance",
+  "controller_name": "pmm_mister",
+  "controller_type": "generic",
+  "executor_refresh_time": 60,
+  "global_sl_enabled": true,
+  "global_stop_loss": 0.01,
+  "global_take_profit": 0.005,
+  "global_tp_enabled": true,
+  "id": "btcbrl-ganjahro-1__toppnl",
+  "leverage": 1,
+  "max_active_executors_by_level": 20,
+  "max_base_pct": 0.8,
+  "min_base_pct": 0.2,
+  "min_skew": 1,
+  "open_order_type": 3,
+  "portfolio_allocation": 0.015,
+  "position_mode": "ONEWAY",
+  "position_profit_protection": true,
+  "price_distance_tolerance": 0.0003,
+  "refresh_tolerance": 0.0012,
+  "sell_amounts_pct": [
+   1
+  ],
+  "sell_cooldown_time": 10,
+  "sell_position_effectivization_time": 300,
+  "sell_spreads": [
+   7.500000000000001e-05
+  ],
+  "take_profit": 0.0002,
+  "take_profit_order_type": 3,
+  "target_base_pct": 0.5,
+  "tick_mode": false,
+  "tolerance_scaling": 1.2,
+  "total_amount_quote": 2000,
+  "trading_pair": "BTC-BRL"
+ },
+ "btcbrl-ganjahro-1__topvol": {
+  "buy_amounts_pct": [
+   1
+  ],
+  "buy_cooldown_time": 10,
+  "buy_position_effectivization_time": 1200,
+  "buy_spreads": [
+   0.0001
+  ],
+  "connector_name": "binance",
+  "controller_name": "pmm_mister",
+  "controller_type": "generic",
+  "executor_refresh_time": 60,
+  "global_sl_enabled": true,
+  "global_stop_loss": 0.01,
+  "global_take_profit": 0.005,
+  "global_tp_enabled": true,
+  "id": "btcbrl-ganjahro-1__topvol",
+  "leverage": 1,
+  "max_active_executors_by_level": 20,
+  "max_base_pct": 0.7,
+  "min_base_pct": 0.3,
+  "min_skew": 1,
+  "open_order_type": 3,
+  "portfolio_allocation": 0.015,
+  "position_mode": "ONEWAY",
+  "position_profit_protection": true,
+  "price_distance_tolerance": 0.0003,
+  "refresh_tolerance": 0.0012,
+  "sell_amounts_pct": [
+   1
+  ],
+  "sell_cooldown_time": 10,
+  "sell_position_effectivization_time": 1200,
+  "sell_spreads": [
+   0.0001
+  ],
+  "take_profit": 0.0002,
+  "take_profit_order_type": 3,
+  "target_base_pct": 0.5,
+  "tick_mode": false,
+  "tolerance_scaling": 1.2,
+  "total_amount_quote": 2000,
+  "trading_pair": "BTC-BRL"
+ },
+ "btcbrl-ganjahro-2__toppnl": {
+  "buy_amounts_pct": [
+   1
+  ],
+  "buy_cooldown_time": 10,
+  "buy_position_effectivization_time": 75,
+  "buy_spreads": [
+   7.5e-05
+  ],
+  "connector_name": "binance",
+  "controller_name": "pmm_mister",
+  "controller_type": "generic",
+  "executor_refresh_time": 60,
+  "global_sl_enabled": true,
+  "global_stop_loss": 0.01,
+  "global_take_profit": 0.005,
+  "global_tp_enabled": true,
+  "id": "btcbrl-ganjahro-2__toppnl",
+  "leverage": 1,
+  "max_active_executors_by_level": 20,
+  "max_base_pct": 0.7,
+  "min_base_pct": 0.3,
+  "min_skew": 1,
+  "open_order_type": 3,
+  "portfolio_allocation": 0.015,
+  "position_mode": "ONEWAY",
+  "position_profit_protection": true,
+  "price_distance_tolerance": 0.0003,
+  "refresh_tolerance": 0.0012,
+  "sell_amounts_pct": [
+   1
+  ],
+  "sell_cooldown_time": 10,
+  "sell_position_effectivization_time": 75,
+  "sell_spreads": [
+   7.5e-05
+  ],
+  "take_profit": 0.0002,
+  "take_profit_order_type": 3,
+  "target_base_pct": 0.5,
+  "tick_mode": false,
+  "tolerance_scaling": 1.2,
+  "total_amount_quote": 2000,
+  "trading_pair": "BTC-BRL"
+ },
+ "btcbrl-ganjahro-2__topvol": {
+  "buy_amounts_pct": [
+   1
+  ],
+  "buy_cooldown_time": 10,
+  "buy_position_effectivization_time": 1200,
+  "buy_spreads": [
+   7.5e-05
+  ],
+  "connector_name": "binance",
+  "controller_name": "pmm_mister",
+  "controller_type": "generic",
+  "executor_refresh_time": 60,
+  "global_sl_enabled": true,
+  "global_stop_loss": 0.01,
+  "global_take_profit": 0.005,
+  "global_tp_enabled": true,
+  "id": "btcbrl-ganjahro-2__topvol",
+  "leverage": 1,
+  "max_active_executors_by_level": 20,
+  "max_base_pct": 0.7,
+  "min_base_pct": 0.3,
+  "min_skew": 1,
+  "open_order_type": 3,
+  "portfolio_allocation": 0.015,
+  "position_mode": "ONEWAY",
+  "position_profit_protection": true,
+  "price_distance_tolerance": 0.0003,
+  "refresh_tolerance": 0.0012,
+  "sell_amounts_pct": [
+   1
+  ],
+  "sell_cooldown_time": 10,
+  "sell_position_effectivization_time": 1200,
+  "sell_spreads": [
+   7.5e-05
+  ],
+  "take_profit": 0.0002,
+  "take_profit_order_type": 3,
+  "target_base_pct": 0.5,
+  "tick_mode": false,
+  "tolerance_scaling": 1.2,
+  "total_amount_quote": 2000,
+  "trading_pair": "BTC-BRL"
+ },
+ "btcbrl-ganjahro-3__toppnl": {
+  "buy_amounts_pct": [
+   1
+  ],
+  "buy_cooldown_time": 10,
+  "buy_position_effectivization_time": 600,
+  "buy_spreads": [
+   0.0002
+  ],
+  "connector_name": "binance",
+  "controller_name": "pmm_mister",
+  "controller_type": "generic",
+  "executor_refresh_time": 60,
+  "global_sl_enabled": true,
+  "global_stop_loss": 0.01,
+  "global_take_profit": 0.005,
+  "global_tp_enabled": true,
+  "id": "btcbrl-ganjahro-3__toppnl",
+  "leverage": 1,
+  "max_active_executors_by_level": 20,
+  "max_base_pct": 0.8,
+  "min_base_pct": 0.2,
+  "min_skew": 1,
+  "open_order_type": 3,
+  "portfolio_allocation": 0.015,
+  "position_mode": "ONEWAY",
+  "position_profit_protection": true,
+  "price_distance_tolerance": 0.0003,
+  "refresh_tolerance": 0.0012,
+  "sell_amounts_pct": [
+   1
+  ],
+  "sell_cooldown_time": 10,
+  "sell_position_effectivization_time": 600,
+  "sell_spreads": [
+   0.0002
+  ],
+  "take_profit": 0.0002,
+  "take_profit_order_type": 3,
+  "target_base_pct": 0.5,
+  "tick_mode": false,
+  "tolerance_scaling": 1.2,
+  "total_amount_quote": 2000,
+  "trading_pair": "BTC-BRL"
+ },
+ "btcbrl-ganjahro-3__topvol": {
+  "buy_amounts_pct": [
+   1
+  ],
+  "buy_cooldown_time": 10,
+  "buy_position_effectivization_time": 1200,
+  "buy_spreads": [
+   0.0002
+  ],
+  "connector_name": "binance",
+  "controller_name": "pmm_mister",
+  "controller_type": "generic",
+  "executor_refresh_time": 60,
+  "global_sl_enabled": true,
+  "global_stop_loss": 0.01,
+  "global_take_profit": 0.005,
+  "global_tp_enabled": true,
+  "id": "btcbrl-ganjahro-3__topvol",
+  "leverage": 1,
+  "max_active_executors_by_level": 20,
+  "max_base_pct": 0.55,
+  "min_base_pct": 0.3,
+  "min_skew": 1,
+  "open_order_type": 3,
+  "portfolio_allocation": 0.015,
+  "position_mode": "ONEWAY",
+  "position_profit_protection": true,
+  "price_distance_tolerance": 0.0003,
+  "refresh_tolerance": 0.0012,
+  "sell_amounts_pct": [
+   1
+  ],
+  "sell_cooldown_time": 10,
+  "sell_position_effectivization_time": 1200,
+  "sell_spreads": [
+   0.0002
+  ],
+  "take_profit": 0.0002,
+  "take_profit_order_type": 3,
+  "target_base_pct": 0.425,
+  "tick_mode": false,
+  "tolerance_scaling": 1.2,
+  "total_amount_quote": 2000,
+  "trading_pair": "BTC-BRL"
+ }
+}
