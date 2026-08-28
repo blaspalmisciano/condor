@@ -3,6 +3,7 @@
 CATEGORY = "Bot Analysis"
 
 import ast
+import asyncio
 import json
 import logging
 import time
@@ -61,7 +62,28 @@ class Config(BaseModel):
     )
     backtest_resolution: str = Field(
         default="3m",
-        description="Backtesting engine resolution. 1m is most accurate but slower for long windows.",
+        description="Backtesting engine resolution. 1m is most accurate but slower for long windows. "
+                    "'1s' is supported over any window via chunking (see chunk_seconds).",
+    )
+    chunk_seconds: int = Field(
+        default=0,
+        description=(
+            "Split the backtest window into sub-windows of this many seconds and stitch "
+            "them into one continuous result. Each sub-run is short, so no single run "
+            "freezes the live API for more than a few seconds. 0 = auto: 3600 (1h "
+            "sub-windows) for 1s resolution, single call otherwise."
+        ),
+    )
+    chunk_warmup_seconds: int = Field(
+        default=0,
+        description=(
+            "Warmup overlap prepended to each chunk so executors spanning a boundary are "
+            "re-established, not lost. 0 = auto (the config's effectivization_time)."
+        ),
+    )
+    chunk_pause_s: float = Field(
+        default=1.0,
+        description="Pause between chunk sub-runs so the live API / event loop recovers.",
     )
     trade_cost: float = Field(
         default=0.0,
@@ -444,11 +466,228 @@ async def _convert_tick_spreads(
     return [s * mult for s in buy_raw], [s * mult for s in sell_raw]
 
 
+# ---------------------------------------------------------------------------
+# Chunked + stitched backtesting (fine resolutions over long windows)
+# ---------------------------------------------------------------------------
+# The server backtest engine runs a per-bar Python loop ON the single uvicorn
+# event loop with no offloading: a long run pins one CPU to 100% and freezes the
+# WHOLE API — every endpoint and all live-bot monitoring — for its entire
+# duration. A 1s/10-day run is 864,000 bars and would freeze the API for tens of
+# minutes. So a 1s backtest cannot be run as one call against a LIVE server.
+#
+# Instead we split the window into short back-to-back sub-windows (default 1h of
+# 1s ≈ 3600 bars, which completes in ~5s — measured), run them sequentially via
+# the async task API (submit → poll → delete, so we never hold one long HTTP
+# connection and never leave a task grinding), pause briefly between runs so the
+# event loop / live monitoring recovers, and stitch the sub-results back into one
+# continuous curve. Each sub-run freezes the API for only single-digit seconds.
+#
+# A warmup overlap (~the controller's effectivization_time) is prepended to each
+# sub-window so executors that would already be open at the chunk boundary get
+# re-established; the warmup portion is then dropped and executors are attributed
+# to exactly one chunk (creation timestamp in [c0, c1)) so nothing double-counts.
+
+CHUNK_TERMINAL = ("completed", "failed", "error", "cancelled")
+
+
+def _bt_payload(task: dict) -> dict:
+    """Return the result payload from a task envelope or a bare result dict."""
+    if not isinstance(task, dict):
+        return {}
+    res = task.get("result")
+    return res if isinstance(res, dict) else task
+
+
+def _auto_warmup_seconds(cfg: dict) -> int:
+    """Warmup overlap = the controller's effectivization time (how long a position
+    takes to become 'effective'), so executors spanning a chunk boundary are
+    re-established inside the warmup rather than lost. Min 300s."""
+    effs = []
+    for k in ("buy_position_effectivization_time", "sell_position_effectivization_time"):
+        try:
+            effs.append(int(float(cfg.get(k) or 0)))
+        except (TypeError, ValueError):
+            pass
+    return max(300, max(effs) if effs else 0)
+
+
+async def _run_one_task(
+    client, cfg: dict, w0: int, w1: int, resolution: str, trade_cost: float,
+    poll_interval: float, poll_timeout: float,
+) -> dict:
+    """Submit ONE backtest sub-window via the task API, poll to completion, and
+    ALWAYS delete the task. Returns the result payload. Raises on failure/timeout."""
+    from condor.backtesting import coerce_controller_config
+
+    submitted = await client.backtesting.submit_task(
+        start_time=int(w0), end_time=int(w1),
+        backtesting_resolution=resolution, trade_cost=trade_cost,
+        config=coerce_controller_config(cfg),
+    )
+    task_id = submitted.get("task_id") if isinstance(submitted, dict) else None
+    if not task_id:
+        raise RuntimeError(f"backtest sub-window not accepted: {submitted}")
+    deadline = time.monotonic() + poll_timeout
+    try:
+        while True:
+            task = await client.backtesting.get_task(task_id)
+            status = task.get("status") if isinstance(task, dict) else None
+            if status in CHUNK_TERMINAL:
+                if status != "completed":
+                    raise RuntimeError(
+                        f"sub-window {status}: {task.get('error') or _bt_payload(task).get('error')}"
+                    )
+                return _bt_payload(task)
+            if time.monotonic() >= deadline:
+                raise TimeoutError(
+                    f"sub-window still {status} after {int(poll_timeout)}s (task {task_id})"
+                )
+            await asyncio.sleep(poll_interval)
+    finally:
+        # Never leave a task grinding on the live server (that is what froze the
+        # API for 86 min before) — delete regardless of how we exit.
+        try:
+            await client.backtesting.delete_task(task_id)
+        except Exception as e:
+            logger.warning("delete_task(%s) failed: %s", task_id, e)
+
+
+async def run_chunked_backtest(
+    client, cfg: dict, start: int, end: int, resolution: str, trade_cost: float,
+    chunk_s: int, warmup_s: int, pause_s: float = 1.0,
+    poll_interval: float = 0.5, poll_timeout: float = 120.0,
+    health_every: int = 25, log=lambda m: None,
+) -> dict:
+    """Backtest [start, end] at a fine resolution by running short sub-windows and
+    stitching them into ONE continuous result shaped like a single backtest
+    (``{results, pnl_timeseries, executors, _chunks}``).
+
+    Each sub-window is ``[c0 - warmup_s, c1]``; only points/executors at/after c0
+    are kept. PnL and cumulative-volume curves are rebased per chunk (so warmup
+    P&L is excluded) and offset by the running total, giving a continuous curve.
+    """
+    boundaries = list(range(int(start), int(end), int(chunk_s)))
+    stitched_pnl: list[dict] = []
+    stitched_execs: list[dict] = []
+    pnl_offset = 0.0
+    vol_offset = 0.0
+    peak = float("-inf")
+    max_dd = 0.0
+    close_types: dict[str, int] = defaultdict(int)
+    chunk_meta: list[dict] = []
+    total_wall = 0.0
+
+    for i, c0 in enumerate(boundaries):
+        c1 = min(c0 + int(chunk_s), int(end))
+        sub_start = c0 - int(warmup_s)
+        t0 = time.monotonic()
+        try:
+            res = await _run_one_task(
+                client, cfg, sub_start, c1, resolution, trade_cost,
+                poll_interval, poll_timeout,
+            )
+        except Exception as e:
+            dt = time.monotonic() - t0
+            total_wall += dt
+            chunk_meta.append({"i": i, "c0": c0, "c1": c1, "wall_s": dt, "error": str(e)[:200]})
+            log(f"chunk {i+1}/{len(boundaries)} FAILED in {dt:.2f}s: {str(e)[:160]}")
+            continue
+        dt = time.monotonic() - t0
+        total_wall += dt
+
+        pts = _bt_payload_series(res)
+        execs = res.get("executors") or []
+        kept = [p for p in pts if float(p.get("timestamp", 0)) >= c0]
+        kept_execs = [
+            e for e in execs
+            if c0 <= float(e.get("timestamp", 0)) < c1
+        ]
+        n_added_pts = 0
+        if kept:
+            base_pnl = float(kept[0].get("total_pnl") or 0.0)
+            base_vol = float(kept[0].get("cumulative_volume") or 0.0)
+            for p in kept:
+                ts = float(p["timestamp"])
+                # The boundary second (ts == previous chunk's c1 == this chunk's c0)
+                # is produced by both chunks; keep only the first so the curve has
+                # no duplicate timestamps.
+                if stitched_pnl and ts <= stitched_pnl[-1]["timestamp"]:
+                    continue
+                tp = pnl_offset + (float(p.get("total_pnl") or 0.0) - base_pnl)
+                cv = vol_offset + (float(p.get("cumulative_volume") or 0.0) - base_vol)
+                peak = max(peak, tp)
+                max_dd = min(max_dd, tp - peak)
+                stitched_pnl.append({
+                    "timestamp": ts,
+                    "total_pnl": tp,
+                    "cumulative_volume": cv,
+                    "active_executors": p.get("active_executors"),
+                })
+            pnl_offset += float(kept[-1].get("total_pnl") or 0.0) - base_pnl
+            vol_offset += float(kept[-1].get("cumulative_volume") or 0.0) - base_vol
+            n_added_pts = len(kept)
+        for e in kept_execs:
+            ct = e.get("close_type")
+            if ct is not None:
+                close_types[str(ct)] += 1
+        stitched_execs.extend(kept_execs)
+
+        chunk_meta.append({
+            "i": i, "c0": c0, "c1": c1, "wall_s": dt,
+            "kept_pts": n_added_pts, "kept_execs": len(kept_execs),
+        })
+        log(f"chunk {i+1}/{len(boundaries)} [{_dt(c0):%m-%d %H:%M}→{_dt(c1):%H:%M}] "
+            f"{dt:.2f}s +{len(kept_execs)} execs, pnl→{pnl_offset:+.2f}")
+
+        if health_every and (i + 1) % health_every == 0:
+            try:
+                th = time.monotonic()
+                await asyncio.wait_for(client.backtesting.list_tasks(), timeout=10)
+                log(f"  API health OK ({time.monotonic()-th:.2f}s) after {i+1} chunks")
+            except Exception as e:
+                log(f"  API HEALTH DEGRADED after {i+1} chunks: {e!r} — stopping early")
+                break
+        if pause_s and i + 1 < len(boundaries):
+            await asyncio.sleep(pause_s)
+
+    filled = sum(1 for e in stitched_execs if float(e.get("filled_amount_quote") or 0) > 0)
+    total_volume = sum(float(e.get("filled_amount_quote") or 0) for e in stitched_execs)
+    results = {
+        "net_pnl_quote": pnl_offset,
+        "total_executors": len(stitched_execs),
+        "total_executors_with_position": filled,
+        "total_volume": total_volume,
+        "close_types": dict(close_types),
+        "max_drawdown_usd": max_dd,
+    }
+    return {
+        "results": results,
+        "pnl_timeseries": stitched_pnl,
+        "executors": stitched_execs,
+        "_chunks": chunk_meta,
+        "_chunk_total_wall_s": total_wall,
+    }
+
+
+def _bt_payload_series(res: dict) -> list:
+    """The pnl_timeseries list from a result payload (tolerant of missing keys)."""
+    pts = res.get("pnl_timeseries")
+    return pts if isinstance(pts, list) else []
+
+
 async def run_server_backtest(
     client, ctrl_cfg: dict, days: int, resolution: str, trade_cost: float,
     tick_converted_spreads: tuple[list[float], list[float]] | None = None,
+    chunk_seconds: int = 0, chunk_warmup_seconds: int = 0, chunk_pause_s: float = 1.0,
+    start: int | None = None, end: int | None = None, log=lambda m: None,
 ) -> dict:
-    """Run the config through the Hummingbot backtesting engine on the server."""
+    """Run the config through the Hummingbot backtesting engine on the server.
+
+    For fine resolutions over a long window the run is chunked+stitched (see
+    ``run_chunked_backtest``) so no single sub-run freezes the live API for more
+    than a few seconds. ``chunk_seconds`` <= 0 auto-selects: 3600s (1h) sub-windows
+    for 1s resolution, single call otherwise.
+    """
     cfg = dict(ctrl_cfg)
     cfg.setdefault("controller_name", "pmm_mister")
     cfg.setdefault("controller_type", "generic")
@@ -467,8 +706,25 @@ async def run_server_backtest(
         for key in ("buy_spreads", "sell_spreads"):
             if key in cfg:
                 cfg[key] = parse_spreads(cfg[key])
-    end = int(time.time()) - 300
-    start = end - days * 86400
+    if end is None:
+        end = int(time.time()) - 300
+    if start is None:
+        start = end - days * 86400
+
+    # Decide chunk size: explicit, else auto (1s → 1h sub-windows).
+    chunk_s = int(chunk_seconds)
+    if chunk_s <= 0:
+        chunk_s = 3600 if resolution == "1s" else 0
+
+    if chunk_s > 0 and (end - start) > chunk_s:
+        warmup = int(chunk_warmup_seconds) or _auto_warmup_seconds(cfg)
+        log(f"chunked backtest: {(end-start)/3600:.1f}h @ {resolution} in "
+            f"{chunk_s//60}m chunks (warmup {warmup}s)")
+        return await run_chunked_backtest(
+            client, cfg, start, end, resolution, trade_cost,
+            chunk_s=chunk_s, warmup_s=warmup, pause_s=chunk_pause_s, log=log,
+        )
+
     return await client.backtesting.run(
         start_time=start, end_time=end,
         backtesting_resolution=resolution, trade_cost=trade_cost, config=cfg,
@@ -554,6 +810,10 @@ async def _execute(config: Config, client, ctrl_cfg: dict) -> RoutineResult:
             bt = await run_server_backtest(
                 client, ctrl_cfg, config.days, config.backtest_resolution, config.trade_cost,
                 tick_converted_spreads=(buy_spreads, sell_spreads) if tick_mode else None,
+                chunk_seconds=config.chunk_seconds,
+                chunk_warmup_seconds=config.chunk_warmup_seconds,
+                chunk_pause_s=config.chunk_pause_s,
+                log=lambda m: logger.info("pmm_level_preview backtest: %s", m),
             )
             bt_kpis, bt_lines = summarize_backtest(bt, config.rebate_rate)
         except Exception as e:

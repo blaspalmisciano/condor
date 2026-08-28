@@ -19,7 +19,13 @@ from telegram.ext import ContextTypes
 
 from config_manager import get_client
 from routines.base import RoutineResult
-from routines.pmm_level_preview import _extract_rows, parse_config_text, parse_spreads
+from routines.pmm_level_preview import (
+    _auto_warmup_seconds,
+    _extract_rows,
+    parse_config_text,
+    parse_spreads,
+    run_chunked_backtest,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -184,13 +190,28 @@ async def run_trial(client, base_cfg: dict, params: dict, w0: int, w1: int,
         c["tick_mode"] = False
     c["id"] = "sweep_trial"
 
+    # 1s (or other fine resolutions) over a multi-hour window must be chunked:
+    # the server engine runs a per-bar loop on the single event loop with no
+    # offloading, so one long 1s run pins a CPU to 100% and FREEZES the whole
+    # live API for its entire duration. Chunking keeps every sub-run to a few
+    # seconds. Coarser resolutions still use the sync endpoint, but with a much
+    # wider wait_for than the old 300s (a big 1m window can legitimately exceed
+    # 300s — the old cap turned a slow-but-fine run into 3 wasted retries).
+    fine = resolution in ("1s", "3s", "5s")
     last_err = None
     for attempt in range(3):
         try:
-            bt = await asyncio.wait_for(client.backtesting.run(
-                start_time=w0, end_time=w1, backtesting_resolution=resolution,
-                trade_cost=trade_cost, config=c,
-            ), timeout=300)
+            if fine and (w1 - w0) > 3600:
+                bt = await run_chunked_backtest(
+                    client, c, w0, w1, resolution, trade_cost,
+                    chunk_s=3600, warmup_s=_auto_warmup_seconds(c),
+                    pause_s=1.0, log=lambda m: logger.info("pmm_sweep chunk: %s", m),
+                )
+            else:
+                bt = await asyncio.wait_for(client.backtesting.run(
+                    start_time=w0, end_time=w1, backtesting_resolution=resolution,
+                    trade_cost=trade_cost, config=c,
+                ), timeout=1800)
             break
         except Exception as e:
             last_err = e
