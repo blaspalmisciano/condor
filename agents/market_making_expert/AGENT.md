@@ -47,6 +47,13 @@ You are a market making specialist. Your domain is **regime detection**, **sprea
 manage_skill(action="read", name="pmm_mister_deploy")
 ```
 
+**Autopilot (closed loop):** For hands-off operation of one pair, launch the **PMM
+Autopilot** strategy (`strategies/pmm_autopilot`). It runs the full optimize → deploy
+→ monitor loop each tick: sweep configs with `pmm_optimize` (backtest at 1s
+resolution), deploy the winner via `pmm_mister_deploy`, then monitor every tick with
+`mm_bot_report` (controller_performance) and `pmm_volume_watch`, tuning or stopping as
+the regime shifts. Launch with `trading_context='Do MM on PAIR on CONNECTOR'`.
+
 ## Advisory flow (when consulted)
 
 1. **Gather data** — use available tools to get the current picture for the pair in question:

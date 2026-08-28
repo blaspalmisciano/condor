@@ -8,33 +8,38 @@ when_to_use: When the user asks for a bot status report, "how is the bot doing",
   after deploying a new bot to verify it's running correctly.
 created: '2026-07-02T15:46:08Z'
 source: agent:market_making_expert
-references_routine: mm_bot_report
+references_routine: controller_performance
 ---
 
 ## MM Bot Report
 
-Run the `mm_bot_report` routine — it fetches everything in one shot:
+Run the `controller_performance` routine — it summarizes every controller that ran
+in the lookback window (active + stopped) in one shot:
 
 ```
-manage_routines(action="run", name="mm_bot_report", config={})
+manage_routines(action="run", name="controller_performance", config={"lookback_days": 7})
 ```
 
 **What it returns:**
-- **Controllers** — active controller count
-- **Open positions** — active executors currently placing quotes (`is_trading=True`)
-- **Hold-mode** — active executors paused/holding inventory (`is_trading=False`)
-- **Recent closes breakdown** — by close type: TP | SL | Early | Hold | Trail | Expired
-- **PnL & Volume** — realized + unrealized PnL per controller, total volume
-- **Error summary** — error count per active bot from live logs
+- **Per-controller summary** — every controller (active + stopped) in the window
+- **Trade table** — the authoritative per-controller trade activity (fills, volume,
+  last-trade time) — this is the ground truth for whether a bot is actually trading
+- **PnL** — realized + unrealized PnL per controller, including maker rebates
+- **Volume share** + cumulative curves, plus a candle+PnL chart
+- **Stall detection** — flags controllers that have gone quiet inside the window
 
 **Config overrides** (pass as `config={}` keys):
+- `lookback_days` — days of history to include (default: 14; use 7 for a recent check)
 - `trading_pair` — filter to one pair (default: all)
-- `connector_name` — filter to one connector (default: all)
-- `recent_closes` — how many closed executors to analyze (default: 100)
-- `include_errors` — set `false` to skip error log fetch (default: true)
+- `controllers` — comma-separated controller names to include (default: all)
+- `controller_types` — filter by controller type (default: all)
+- `include_stopped` — include stopped controllers (default: true)
+- `stall_hours` — flag a controller with no trades in this many hours as stalled
 
 **After reading the output:**
-1. Surface the KPIs (open positions, hold-mode count, top close type).
-2. Flag any errors — if errors are present, note the bot name and count. For deeper log analysis run `manage_routines(action="run", name="logs_summary")` (global routine).
-3. If hold-mode > 0 and user hasn't set it intentionally, flag it — positions holding inventory aren't earning spread.
+1. Surface the KPIs (active controllers, PnL, volume) per controller.
+2. Read the **trade table** to confirm each bot is actually filling — a controller
+   with zero recent fills is stalled even if it still shows as "running".
+3. Flag any stalled controllers (see stall detection); for deeper log analysis run
+   `manage_routines(action="run", name="logs_summary")` (global routine).
 4. Summarize PnL vs volume to comment on fee efficiency.
