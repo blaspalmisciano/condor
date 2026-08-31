@@ -88,8 +88,16 @@ def _save(path, obj):
     os.replace(tmp, path)
 
 
+def _clean_live_config(cfg: dict) -> dict:
+    """Strip underscore-prefixed metadata the live API attaches (e.g. `_config_name`).
+    CRITICAL: `_config_name` present in a config makes the backtest engine create
+    ZERO executors (silent 0-volume). Must be removed before backtesting."""
+    return {k: v for k, v in cfg.items() if not k.startswith("_")}
+
+
 async def _sweep_controller(local, cid, base_cfg, w0, w1, scfg, config, log):
     """Sweep one live config on the local stack; return (base_t, best, ok_trials, axes) or None."""
+    base_cfg = _clean_live_config(base_cfg)
     pair = (base_cfg.get("trading_pair") or "").upper()
     conn = base_cfg.get("connector_name") or "binance"
     days_back = max(1, config.window_hours // 24 + 1)
@@ -106,10 +114,22 @@ async def _sweep_controller(local, cid, base_cfg, w0, w1, scfg, config, log):
         log(f"{cid}: no successful trials")
         return None
     axes = get_axes(base_cfg)
+    # Objective at 1s = VOLUME (turnover). Profit is rebate-driven, so more volume =
+    # more rebate; volume differs by thousands across variants and is the robust
+    # differentiator (business PnL and risk_adj collapse to sub-unit noise at 1s on
+    # small live capital). Guardrails keep the winner honest: business PnL may not
+    # drop more than `biz_floor` below base, and max_dd no worse than 1.6× base's.
+    biz_floor = 0.5
     for t in ok:
+        t["_biz"] = score(t, scfg.rebate_rate)["business_pnl"]
         t["_rs"] = risk_score(t, scfg.rebate_rate)["risk_adj_pnl"]
+        t["_vol"] = t["volume"]
     base_t = next((t for t in ok if not t.get("params")), None)
-    best = max(ok, key=lambda t: t["_rs"])
+    base_biz = base_t["_biz"] if base_t else 0.0
+    base_dd = base_t["max_dd"] if base_t else -1e9
+    cand = [t for t in ok if t.get("params")
+            and t["_biz"] >= base_biz - biz_floor and t["max_dd"] >= base_dd * 1.6]
+    best = max(cand, key=lambda t: t["_vol"]) if cand else (base_t or max(ok, key=lambda t: t["_vol"]))
     return base_t, best, ok, axes
 
 
@@ -158,24 +178,24 @@ async def _one_lap(config: Config, live, local, snaps, log) -> dict:
 
     analyses, proposals = [], []
     for cid, base_cfg in cands:
-        base_cfg = dict(base_cfg)
+        base_cfg = _clean_live_config(dict(base_cfg))
         base_cfg.setdefault("id", cid)
         swept = await _sweep_controller(local, cid, base_cfg, w0, w1, scfg, config, log)
         if not swept:
             continue
         base_t, best, ok, axes = swept
-        base_rs = base_t["_rs"] if base_t else 0.0
-        uplift = best["_rs"] - base_rs
+        base_vol = base_t["_vol"] if base_t else 0.0
+        uplift = best["_vol"] - base_vol  # volume (turnover) uplift, BRL
         calib = _windowed_calibration(cid, live_perf.get(cid, {}), base_t, w0, w1, scfg, snaps, now)
         label = _tlabel(best, axes) or "BASE"
         improved = bool(best.get("params")) and uplift >= config.min_uplift
-        log(f"{cid}: base {base_rs:+.1f} -> best '{label}' {best['_rs']:+.1f} (uplift {uplift:+.1f}) "
-            f"| trust {calib.get('trust')}")
+        log(f"{cid}: base vol {base_vol:,.0f} -> best '{label}' {best['_vol']:,.0f} "
+            f"(uplift {uplift:+,.0f}) | trust {calib.get('trust')}")
         analyses.append({
             "controller_id": cid, "pair": (base_cfg.get("trading_pair") or "").upper(),
-            "n_trials": len(ok), "base_risk_adj": round(base_rs, 2), "best_label": label,
-            "best_risk_adj": round(best["_rs"], 2), "uplift": round(uplift, 2),
-            "trust": calib.get("trust"), "proposed": improved,
+            "n_trials": len(ok), "base_vol": round(base_vol, 0), "best_label": label,
+            "best_vol": round(best["_vol"], 0), "uplift": round(uplift, 0),
+            "best_biz": round(best["_biz"], 2), "trust": calib.get("trust"), "proposed": improved,
         })
         if improved:
             full_cfg = apply_params(base_cfg, best["params"], axes)
@@ -184,10 +204,10 @@ async def _one_lap(config: Config, live, local, snaps, log) -> dict:
             proposals.append({
                 "proposal_id": pid, "controller_id": cid, "bot": cid_bot.get(cid),
                 "pair": (base_cfg.get("trading_pair") or "").upper(), "label": label,
-                "params": best["params"], "base_risk_adj": round(base_rs, 2),
-                "best_risk_adj": round(best["_rs"], 2), "uplift": round(uplift, 2),
-                "best_biz": round(score(best, scfg.rebate_rate)["business_pnl"], 2),
-                "best_vol": round(best["volume"], 0), "max_dd": round(best["max_dd"], 1),
+                "params": best["params"], "base_vol": round(base_vol, 0),
+                "best_vol": round(best["_vol"], 0), "vol_uplift": round(uplift, 0),
+                "base_biz": round(base_t["_biz"] if base_t else 0.0, 2),
+                "best_biz": round(best["_biz"], 2), "max_dd": round(best["max_dd"], 1),
                 "calibration": calib, "full_config": full_cfg, "window": [w0, w1],
                 "resolution": config.resolution, "created": now, "status": "proposed",
             })
@@ -211,13 +231,13 @@ async def _one_lap(config: Config, live, local, snaps, log) -> dict:
         flag = "✅ propose" if a["proposed"] else "— hold (base optimal)"
         tr = "warm-up" if a["trust"] is None else a["trust"]
         lines.append(f"• `{a['controller_id']}` [{a['pair']}] · {a['n_trials']} variants · "
-                     f"risk-adj {a['base_risk_adj']:+}→{a['best_risk_adj']:+} (uplift {a['uplift']:+}) · "
+                     f"vol {a['base_vol']:,.0f}→{a['best_vol']:,.0f} (uplift {a['uplift']:+,.0f}) · "
                      f"trust {tr} → {flag}")
     if proposals:
         lines.append(f"\n*{len(proposals)} proposal(s) awaiting your OK:*")
         for p in proposals:
             lines.append(f"  `{p['proposal_id']}` {p['controller_id']} → *{p['label']}* "
-                         f"(uplift {p['uplift']:+}, vol {p['best_vol']:,.0f})"
+                         f"(vol uplift {p['vol_uplift']:+,.0f} → {p['best_vol']:,.0f})"
                          + ("  _(deploy button: M4)_" if config.dry_run else ""))
     else:
         lines.append("\n_No variant beat the live config — fleet near-optimal this window._")
