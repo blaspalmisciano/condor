@@ -260,8 +260,21 @@ def select_topN(pool: list, fleet: dict, biz_floor: float = -1.0, cap_tol: float
     budget = float(fleet.get("total_capital") or 0.0) * cap_tol
     elig = [c for c in pool if c.get("biz", 0) >= biz_floor]
     elig.sort(key=lambda c: -c.get("volume", 0))
-    selected, cap_used, seen = [], 0.0, set()
+    # Collapse degenerate clones: variants that produce byte-identical results (e.g.
+    # inventory-band tweaks that don't change this config) would otherwise fill the
+    # fleet with duplicate controllers. Keep, per (origin, volume, biz, maxDD), only
+    # the simplest-label candidate — so the top-N is N DISTINCT deployables.
+    uniq, dedup = {}, []
     for c in elig:
+        key = (c.get("origin"), round(c.get("volume", 0)), round(c.get("biz", 0), 1),
+               round(c.get("max_dd", 0), 1))
+        if key in uniq:
+            continue
+        uniq[key] = True
+        dedup.append(c)
+    dedup.sort(key=lambda c: (-c.get("volume", 0), len(str(c.get("params") or {}))))
+    selected, cap_used, seen = [], 0.0, set()
+    for c in dedup:
         if len(selected) >= N:
             break
         if c["cand_id"] in seen:
