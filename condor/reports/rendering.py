@@ -106,10 +106,17 @@ HTML_TEMPLATE = """\
     background: var(--surface-raised); text-align: left; padding: 8px 12px;
     font-weight: 600; font-size: 11px; text-transform: uppercase; letter-spacing: 0.5px;
     color: var(--text-muted); border: 1px solid var(--border-strong);
+    cursor: pointer; user-select: none;
   }}
-  .section-table td {{ padding: 8px 12px; border: 1px solid var(--border-strong); }}
+  .section-table th:hover {{ color: var(--text); }}
+  .section-table td {{ padding: 8px 12px; border: 1px solid var(--border-strong); font-variant-numeric: tabular-nums; }}
   .section-table tr:nth-child(even) td {{ background: rgba(123,139,164,0.06); }}
   .section-table tr:last-child td {{ border-bottom: none; }}
+  .static-table-toolbar {{ margin-bottom: 8px; }}
+  .static-table-toolbar input {{
+    background: var(--surface-raised); color: var(--text); border: 1px solid var(--border-strong);
+    border-radius: 6px; padding: 7px 10px; color-scheme: inherit; max-width: 320px; width: 100%;
+  }}
   .plotly-chart {{ min-height: 400px; margin-bottom: 24px; width: 100%; overflow: hidden; }}
   .plotly-chart .js-plotly-plot, .plotly-chart .plot-container, .plotly-chart .plotly {{ width: 100% !important; }}
   .report-panel {{ background: var(--surface); border: 1px solid var(--border); border-radius: 8px; padding: 16px; min-width: 0; }}

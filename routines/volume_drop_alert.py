@@ -534,13 +534,15 @@ async def _discover_targets(client) -> dict:
         results = await _asyncio.gather(
             *[_fetch_one(bn) for bn in bots.keys()], return_exceptions=False
         )
-        for cfgs in results:
+        ctrl_bot_name: dict[str, str] = {}
+        for bn, cfgs in zip(bots.keys(), results):
             for cfg in cfgs or []:
                 if not isinstance(cfg, dict):
                     continue
                 cid = cfg.get("id") or cfg.get("controller_id")
                 if cid:
                     ctrl_configs[cid] = cfg
+                    ctrl_bot_name[cid] = bn
 
     for bot_name, bot_info in bots.items():
         if not isinstance(bot_info, dict):
@@ -629,6 +631,51 @@ async def _discover_targets(client) -> dict:
                 "running_execs": [],
                 "positions_summary": positions_summary,
             }
+
+    # Create fallback targets for controllers that appear in bot configs but are
+    # absent from the performance dict (e.g. rebate_mill and other generic types).
+    for cid, cfg in ctrl_configs.items():
+        if cid in bot_ctrl_key:
+            continue
+        bot_name = ctrl_bot_name.get(cid)
+        if not bot_name:
+            continue
+        started_at = _bot_deploy_ts(bot_name)
+        ctrl_name = cfg.get("controller_name") or ""
+        kind = _kind_from_controller_name(ctrl_name) or _kind_from_controller_name(cid)
+        fb_pairs: set[str] = set()
+        fb_conns: set[str] = set()
+        if cfg.get("trading_pair"):
+            fb_pairs.add(cfg["trading_pair"])
+        if cfg.get("connector_name"):
+            fb_conns.add(cfg["connector_name"])
+        try:
+            capital_quote = float(cfg.get("total_amount_quote") or 0.0)
+        except (TypeError, ValueError):
+            capital_quote = 0.0
+        key = f"bot/{bot_name}/{cid}"
+        bot_ctrl_key[cid] = key
+        targets[key] = {
+            "source": "bot",
+            "bot_name": bot_name,
+            "controller_id": cid,
+            "display_id": cid,
+            "controller_kind": kind,
+            "controller_name": ctrl_name,
+            "trading_pairs": fb_pairs,
+            "connectors": fb_conns,
+            "accounts": set(),
+            "current_volume": 0.0,
+            "started_at": started_at,
+            "n_running_executors": 0,
+            "realized_pnl": 0.0,
+            "unrealized_pnl": 0.0,
+            "global_pnl": 0.0,
+            "global_pnl_pct": 0.0,
+            "capital_quote": capital_quote,
+            "running_execs": [],
+            "positions_summary": [],
+        }
 
     # --- 2. Unified RUNNING-executor scan ---
     # ONE pass over all running executors, bucketed by controller_id. If we own
@@ -883,7 +930,9 @@ async def run(config: Config, context: ContextTypes.DEFAULT_TYPE) -> str:
         # → pace stuck at "starting…".
         cstate = controllers_state.setdefault(key, {"snapshots": []})
         if "first_seen_ts" not in cstate:
-            cstate["first_seen_ts"] = earliest_ts if earliest_ts else now
+            # Try bot-name timestamp, then controller-ID timestamp (encodes deploy
+            # time for sell-bot names like "btcbrl-sell__20260901-112345"), then now.
+            cstate["first_seen_ts"] = earliest_ts or _bot_deploy_ts(cid) or now
         earliest_ts = cstate["first_seen_ts"]
         t["started_at"] = earliest_ts
         ctrl["earliest_ts"] = earliest_ts
@@ -1012,6 +1061,7 @@ async def run(config: Config, context: ContextTypes.DEFAULT_TYPE) -> str:
         scale = 86400.0 / t_span if t_span < 86400.0 else 1.0
         return p_span * scale, v_span * scale, t_span
 
+    global_ctrl_counter = 0
     for bot_name, keys in by_bot.items():
         # ── Bot section (orchestrated bots AND synthetic "(direct executors)") ──
         # Aggregate across this bot's controllers
@@ -1220,9 +1270,12 @@ async def run(config: Config, context: ContextTypes.DEFAULT_TYPE) -> str:
         # observed, but the bot reports lifetime volume via orchestration.
         # In that case we drive the header from orchestration data + snapshot
         # deltas instead of from running_execs (which are empty).
-        is_pmm_style = (not kind_counts_bot) and (
-            dominant in ("position", "dca", "order") or agg_vol > 0
-        )
+        # Any controller that doesn't surface RUNNING executors via the executor
+        # API (PMM, rebate_mill, chessboard, …) is rendered via the
+        # orchestration-based path. Don't gate on volume or dominant kind — both
+        # are zero/unknown for generic controllers that are alive but not yet in
+        # the perf dict.
+        is_pmm_style = not kind_counts_bot
 
         # `bot_pace_src` tags the provenance of the displayed pace:
         #   'snap'    — recent-window snapshot delta (the truth)
@@ -1246,7 +1299,14 @@ async def run(config: Config, context: ContextTypes.DEFAULT_TYPE) -> str:
             run_pace_hr = bot_recent_pace * pace_rate * 3600.0
             run_filled = agg_vol
             run_pnl = agg_pnl
-            n_running_grids = len(keys)
+            # Count only controllers whose kind matches the dominant kind so that
+            # non-pmm_mister controllers (e.g. rebate_mill, kind=None) don't inflate
+            # the header count (Bug 2: "19 PMM misters" instead of 18).
+            n_running_grids = (
+                sum(1 for k in keys if targets[k].get("controller_kind") == dominant)
+                if dominant and dominant != "exec"
+                else len(keys)
+            )
             if run_pace_hr <= 0:
                 if bot_is_stale:
                     bot_pace_src = "stale"
@@ -1278,7 +1338,7 @@ async def run(config: Config, context: ContextTypes.DEFAULT_TYPE) -> str:
                     targets[keys[0]].get("controller_name")
                     if keys else ""
                 ) or "controllers"
-                live_label = f"live {first_name} controllers"
+                live_label = f"live {first_name.replace('_', ' ')} controllers"
         elif mixed:
             live_label = "live executors"
         elif dominant == "grid":
@@ -1466,7 +1526,9 @@ async def run(config: Config, context: ContextTypes.DEFAULT_TYPE) -> str:
         any_ctrl_alert = False
 
         if is_pmm_style and not per_grid:
-            for i, key in enumerate(keys, 1):
+            for key in keys:
+                global_ctrl_counter += 1
+                i = global_ctrl_counter
                 t_ = targets[key]
                 cid = t_.get("display_id") or "?"
                 pair_set = sorted(t_.get("trading_pairs") or [])
@@ -1477,10 +1539,11 @@ async def run(config: Config, context: ContextTypes.DEFAULT_TYPE) -> str:
                 upnl = bot_money(float(t_.get("unrealized_pnl") or 0.0))
                 pnl_pct = float(t_.get("global_pnl_pct") or 0.0)
                 pnl_icon = "📈" if pnl >= 0 else "📉"
-                # Age: prefer the bot's deploy timestamp (parsed from the bot
-                # name) over `started_at`, which is unreliable after a fresh
-                # state file or log rotation.
-                deploy_ts_ctrl = _bot_deploy_ts(bot_name) or t_.get("started_at")
+                # Age: prefer the bot's deploy timestamp, then the controller-ID
+                # timestamp (handles "btcbrl-sell__YYYYMMDD-HHMMSS" naming), then
+                # started_at. The cid fallback fixes 0m uptime on sell-bot controllers
+                # whose bot name has no embedded date (Bug 3).
+                deploy_ts_ctrl = _bot_deploy_ts(bot_name) or _bot_deploy_ts(cid) or t_.get("started_at")
                 age = ""
                 if deploy_ts_ctrl:
                     age_sec = max(now - float(deploy_ts_ctrl), 0.0)
@@ -1542,7 +1605,11 @@ async def run(config: Config, context: ContextTypes.DEFAULT_TYPE) -> str:
                 if "pmm" in cname.lower():
                     row_title = "PMM controller"
                 elif cname:
-                    row_title = cname
+                    # Replace underscores with spaces: Telegram legacy Markdown
+                    # treats "_" as italic delimiter even inside *bold*, so a
+                    # name like "rebate_mill" inside *#N rebate_mill* causes a
+                    # parse error that silently drops the whole chunk (Bug 1).
+                    row_title = cname.replace("_", " ")
                 else:
                     row_title = "controller"
                 # PnL we show INCLUDES estimated maker rebates. The two
@@ -1571,7 +1638,9 @@ async def run(config: Config, context: ContextTypes.DEFAULT_TYPE) -> str:
             # Skip the per_grid loop entirely for PMM-style bots
             per_grid = []
 
-        for i, g in enumerate(per_grid, 1):
+        for g in per_grid:
+            global_ctrl_counter += 1
+            i = global_ctrl_counter
             ex = g["ex"]
             kind = ex.get("kind") or "other"
             side = ex.get("side")
@@ -1780,18 +1849,12 @@ async def run(config: Config, context: ContextTypes.DEFAULT_TYPE) -> str:
                 + "\n" + subtitle
                 + "\n" + thin
             )
-        # Horizontal divider between bot sections so grids and PMMs read as
-        # distinct blocks rather than a continuous wall of stats.
-        bot_separator = f"\n\n{thin}\n\n"
-        unified_text = header + "\n\n" + bot_separator.join(summary_lines)
         kb = InlineKeyboardMarkup(alert_rows) if alert_rows else None
         # Alert → ring. No alert → silent push (message appears, no sound/badge).
         silent_push = not alert_rows
 
-        # Telegram caps messages at 4096 chars. With many controllers the
-        # combined message has overflowed (returning HTTP 400 "Message is
-        # too long"). Split at blank-line boundaries so Markdown spans
-        # (bold / italic / code) stay intact within each chunk.
+        # Telegram caps messages at 4096 chars. Split at blank-line boundaries
+        # so Markdown spans (bold / italic / code) stay intact within each chunk.
         TG_MAX_CHARS = 3800  # buffer under the 4096 ceiling for safety
 
         def _chunk_for_telegram(text: str, limit: int = TG_MAX_CHARS) -> list[str]:
@@ -1813,25 +1876,61 @@ async def run(config: Config, context: ContextTypes.DEFAULT_TYPE) -> str:
                 chunks.append(remaining)
             return chunks
 
-        message_chunks = _chunk_for_telegram(unified_text)
-        last_idx = len(message_chunks) - 1
-        for i, chunk in enumerate(message_chunks):
-            # Attach the inline keyboard only to the last chunk so the
-            # alert buttons appear at the bottom of the conversation.
-            is_last = i == last_idx
+        # Send header as its own message (banner + subtitle + totals).
+        try:
+            await bot.send_message(
+                chat_id=chat_id,
+                text=header,
+                parse_mode="Markdown",
+                disable_notification=silent_push,
+            )
+        except Exception as e:
+            logger.warning("Markdown send failed for header: %s — retrying as plain text", e)
             try:
+                import re as _re
+                plain_header = _re.sub(r"[*_`\[\]]", "", header)
                 await bot.send_message(
                     chat_id=chat_id,
-                    text=chunk,
-                    parse_mode="Markdown",
-                    reply_markup=kb if is_last else None,
+                    text=plain_header,
                     disable_notification=silent_push,
                 )
-            except Exception as e:
-                logger.warning(
-                    "Failed to send unified message chunk %d/%d: %s",
-                    i + 1, last_idx + 1, e,
-                )
+            except Exception as e2:
+                logger.error("Plain-text header fallback also failed: %s", e2)
+
+        # Send each bot section as its own message so no Markdown span is ever
+        # split across a send boundary. The previous unified-text approach split
+        # mid-section when bot 1 exceeded ~4096 chars, silently dropping #7-#13.
+        last_bot_idx = len(summary_lines) - 1
+        for bi, bot_sec in enumerate(summary_lines):
+            is_last_bot = bi == last_bot_idx
+            chunks = _chunk_for_telegram(bot_sec)
+            last_chunk_idx = len(chunks) - 1
+            for ci, chunk in enumerate(chunks):
+                is_last_chunk = is_last_bot and ci == last_chunk_idx
+                try:
+                    await bot.send_message(
+                        chat_id=chat_id,
+                        text=chunk,
+                        parse_mode="Markdown",
+                        reply_markup=kb if is_last_chunk else None,
+                        disable_notification=silent_push,
+                    )
+                except Exception as e:
+                    logger.warning(
+                        "Markdown send failed for bot section %d chunk %d: %s — retrying as plain text",
+                        bi + 1, ci + 1, e,
+                    )
+                    try:
+                        import re as _re
+                        plain = _re.sub(r"[*_`\[\]]", "", chunk)
+                        await bot.send_message(
+                            chat_id=chat_id,
+                            text=plain,
+                            reply_markup=kb if is_last_chunk else None,
+                            disable_notification=silent_push,
+                        )
+                    except Exception as e2:
+                        logger.error("Plain-text fallback also failed for section %d chunk %d: %s", bi + 1, ci + 1, e2)
 
     short = (
         f"checked {len(targets)} | "

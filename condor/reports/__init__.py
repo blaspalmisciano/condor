@@ -1,6 +1,6 @@
 """Composable HTML reports and persistent report storage."""
 
-from .builder import LiveReport, ReportBuilder
+from .builder import Html, LiveReport, ReportBuilder
 from .store import (
     CHARTS_DIR,
     INDEX_FILE,
@@ -17,6 +17,7 @@ from .store import (
 )
 
 __all__ = [
+    "Html",
     "ReportBuilder",
     "LiveReport",
     "CHARTS_DIR",

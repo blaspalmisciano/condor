@@ -406,6 +406,11 @@ def _kind_from_controller_name(name: str) -> Optional[str]:
         return "grid"
     if "pmm" in n or "market_making" in n or "market-making" in n:
         return "position"
+    if "rebate" in n:
+        # rebate_mill is PMM-style: no persistent running executors, driven by
+        # bot orchestration volume_traded. Mapping to "position" ensures
+        # is_pmm_style=True even when current volume is 0 (between clips).
+        return "position"
     if "dca" in n:
         return "dca"
     return None
@@ -1278,7 +1283,7 @@ async def run(config: Config, context: ContextTypes.DEFAULT_TYPE) -> str:
                     targets[keys[0]].get("controller_name")
                     if keys else ""
                 ) or "controllers"
-                live_label = f"live {first_name} controllers"
+                live_label = f"live {first_name.replace('_', ' ')} controllers"
         elif mixed:
             live_label = "live executors"
         elif dominant == "grid":
@@ -1542,7 +1547,11 @@ async def run(config: Config, context: ContextTypes.DEFAULT_TYPE) -> str:
                 if "pmm" in cname.lower():
                     row_title = "PMM controller"
                 elif cname:
-                    row_title = cname
+                    # Replace underscores with spaces: Telegram legacy Markdown
+                    # treats "_" as italic delimiter even inside *bold*, so a
+                    # name like "rebate_mill" inside *#N rebate_mill* causes a
+                    # parse error that silently drops the whole chunk.
+                    row_title = cname.replace("_", " ")
                 else:
                     row_title = "controller"
                 # PnL we show INCLUDES estimated maker rebates. The two
@@ -1780,18 +1789,15 @@ async def run(config: Config, context: ContextTypes.DEFAULT_TYPE) -> str:
                 + "\n" + subtitle
                 + "\n" + thin
             )
-        # Horizontal divider between bot sections so grids and PMMs read as
-        # distinct blocks rather than a continuous wall of stats.
-        bot_separator = f"\n\n{thin}\n\n"
-        unified_text = header + "\n\n" + bot_separator.join(summary_lines)
         kb = InlineKeyboardMarkup(alert_rows) if alert_rows else None
         # Alert → ring. No alert → silent push (message appears, no sound/badge).
         silent_push = not alert_rows
 
         # Telegram caps messages at 4096 chars. With many controllers the
-        # combined message has overflowed (returning HTTP 400 "Message is
-        # too long"). Split at blank-line boundaries so Markdown spans
-        # (bold / italic / code) stay intact within each chunk.
+        # combined message overflows. Fix: send the header once, then each bot
+        # section as its own message. This avoids splitting a unified string
+        # mid-Markdown-span (e.g. *bold across a chunk boundary), which makes
+        # Telegram reject the second chunk silently.
         TG_MAX_CHARS = 3800  # buffer under the 4096 ceiling for safety
 
         def _chunk_for_telegram(text: str, limit: int = TG_MAX_CHARS) -> list[str]:
@@ -1813,25 +1819,38 @@ async def run(config: Config, context: ContextTypes.DEFAULT_TYPE) -> str:
                 chunks.append(remaining)
             return chunks
 
-        message_chunks = _chunk_for_telegram(unified_text)
-        last_idx = len(message_chunks) - 1
-        for i, chunk in enumerate(message_chunks):
-            # Attach the inline keyboard only to the last chunk so the
-            # alert buttons appear at the bottom of the conversation.
-            is_last = i == last_idx
+        async def _send(text: str, reply_markup=None) -> None:
             try:
                 await bot.send_message(
                     chat_id=chat_id,
-                    text=chunk,
+                    text=text,
                     parse_mode="Markdown",
-                    reply_markup=kb if is_last else None,
+                    reply_markup=reply_markup,
                     disable_notification=silent_push,
                 )
             except Exception as e:
-                logger.warning(
-                    "Failed to send unified message chunk %d/%d: %s",
-                    i + 1, last_idx + 1, e,
-                )
+                logger.warning("Markdown send failed (%s); retrying plain", e)
+                try:
+                    await bot.send_message(
+                        chat_id=chat_id,
+                        text=text,
+                        reply_markup=reply_markup,
+                        disable_notification=silent_push,
+                    )
+                except Exception as e2:
+                    logger.error("Plain-text send also failed: %s", e2)
+
+        # 1. Header message (banner + grand totals when > 1 bot).
+        await _send(header)
+
+        # 2. One Telegram message per bot section; chunk further only when a
+        #    single section still exceeds TG_MAX_CHARS (e.g. many executors).
+        for i, section in enumerate(summary_lines):
+            is_last_bot = i == len(summary_lines) - 1
+            chunks = _chunk_for_telegram(section)
+            for j, chunk in enumerate(chunks):
+                is_last_chunk = is_last_bot and j == len(chunks) - 1
+                await _send(chunk, reply_markup=kb if is_last_chunk else None)
 
     short = (
         f"checked {len(targets)} | "

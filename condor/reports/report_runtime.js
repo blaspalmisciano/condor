@@ -931,11 +931,72 @@
     updateActions();
   }
 
+  function initStaticTables() {
+    document.querySelectorAll(".section-table").forEach(function (container) {
+      const table = container.querySelector("table");
+      const input = container.querySelector(".static-table-search");
+      if (!table) return;
+
+      let sortField = null;
+      let sortDir = 1;
+
+      function applyFilter() {
+        const query = input ? input.value.toLowerCase() : "";
+        Array.from(table.querySelectorAll("tbody tr")).forEach(function (row) {
+          const firstCell = row.querySelector("td:first-child");
+          const text = firstCell ? (firstCell.dataset.sort || firstCell.textContent || "").toLowerCase() : "";
+          row.style.display = !query || text.includes(query) ? "" : "none";
+        });
+      }
+
+      function applySort() {
+        if (!sortField) return;
+        const headers = Array.from(table.querySelectorAll("thead th"));
+        const colIdx = headers.findIndex(function (th) { return th.dataset.field === sortField; });
+        if (colIdx < 0) return;
+        const tbody = table.querySelector("tbody");
+        const rows = Array.from(tbody.querySelectorAll("tr"));
+        rows.sort(function (a, b) {
+          const aCells = a.querySelectorAll("td");
+          const bCells = b.querySelectorAll("td");
+          const av = aCells[colIdx] ? (aCells[colIdx].dataset.sort || "") : "";
+          const bv = bCells[colIdx] ? (bCells[colIdx].dataset.sort || "") : "";
+          const an = parseFloat(av.replace(/[^0-9eE.+-]/g, ""));
+          const bn = parseFloat(bv.replace(/[^0-9eE.+-]/g, ""));
+          const result = Number.isFinite(an) && Number.isFinite(bn)
+            ? an - bn
+            : av.localeCompare(bv, undefined, { numeric: true });
+          return result * sortDir;
+        });
+        rows.forEach(function (row) { tbody.appendChild(row); });
+        headers.forEach(function (th) {
+          const field = th.dataset.field || "";
+          const marker = sortField && th.dataset.field === sortField ? (sortDir > 0 ? " ▲" : " ▼") : "";
+          th.textContent = field + marker;
+        });
+      }
+
+      if (input) input.addEventListener("input", applyFilter);
+
+      table.querySelectorAll("thead th[data-field]").forEach(function (th) {
+        th.style.cursor = "pointer";
+        th.title = "Click to sort";
+        th.addEventListener("click", function () {
+          const field = th.dataset.field;
+          if (sortField === field) sortDir *= -1;
+          else { sortField = field; sortDir = 1; }
+          applySort();
+        });
+      });
+    });
+  }
+
   function initialize() {
     for (const component of components) {
       if (component.type === "filter") renderFilter(component);
     }
     renderAll();
+    initStaticTables();
   }
 
   window.CondorReportRuntime = {

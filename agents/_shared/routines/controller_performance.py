@@ -1304,11 +1304,7 @@ def build_summary(events, live, type_lookup, pair_lookup, rebate_rate, active_id
         })
     rows.sort(key=lambda r: r["_sort"], reverse=True)
 
-    # ── Per-column heatmap coloring ──
-    # For each numeric column, normalize values in [0,1] and wrap the display
-    # cell in an inline <span> with a background color from the same cyan →
-    # yellow → magenta ramp used by the parameter heatmap. Diverging columns
-    # (PnL, Unreal.) center on 0: reds for losses, greens for gains.
+    # ── Per-column heatmap coloring — Condor palette ──
     def _interp(t: float, stops: list[tuple[float, tuple[int,int,int]]]) -> str:
         for i in range(len(stops)-1):
             (a, ca), (b, cb) = stops[i], stops[i+1]
@@ -1318,24 +1314,28 @@ def build_summary(events, live, type_lookup, pair_lookup, rebate_rate, active_id
                 gg = int(ca[1] + r*(cb[1]-ca[1]))
                 bb = int(ca[2] + r*(cb[2]-ca[2]))
                 return f"rgb({rr},{gg},{bb})"
-        return "rgb(120,120,120)"
-    SEQ_STOPS = [(0.0,(79,172,254)),(0.5,(255,209,102)),(1.0,(239,71,111))]  # cyan→yellow→magenta
-    DIV_STOPS = [(0.0,(220,80,80)),(0.5,(120,120,120)),(1.0,(80,200,120))]   # red→gray→green
-    SEQ_COLS = {"Capital", "Runs", "Fill %", "Window Vol", "Live Vol"}
-    DIV_COLS = {"24h Yield", "Window PnL+Reb", "Live PnL", "Unreal."}
+        return "rgb(139,148,158)"
 
-    # Report table now escapes cell text (upstream security tightening), so we
-    # wrap in Html() to signal this string is pre-built HTML the routine owns
-    # and must be rendered as-is (no escape).
-    from condor.reports import Html as _RawHtml
+    # Condor dark-theme stops — (t, (R,G,B))
+    DIV_STOPS  = [(0.0,(248,81,73)),(0.5,(139,148,158)),(1.0,(63,185,80))]   # red→gray→green (PnL)
+    SEQ_VOL    = [(0.0,(22,27,34)),(1.0,(88,166,255))]                        # dark→blue (volume)
+    SEQ_CAP    = [(0.0,(22,27,34)),(1.0,(163,113,247))]                       # dark→purple (capital)
+    SEQ_FILL   = [(0.0,(139,148,158)),(1.0,(63,185,80))]                      # gray→green (fill %)
+    SEQ_RUNS   = [(0.0,(139,148,158)),(1.0,(88,166,255))]                     # gray→blue (informational)
 
-    def _wrap(display: str, color: str):
-        return _RawHtml(
-            f'<span style="background:{color};padding:2px 6px;border-radius:3px;'
-            f'color:#0d1117;font-weight:600;">{display}</span>'
-        )
+    COL_STOPS: dict[str, tuple] = {
+        "Window PnL+Reb": (DIV_STOPS, True),
+        "Live PnL":       (DIV_STOPS, True),
+        "24h Yield":      (DIV_STOPS, True),
+        "Unreal.":        (DIV_STOPS, True),
+        "Window Vol":     (SEQ_VOL,   False),
+        "Live Vol":       (SEQ_VOL,   False),
+        "Capital":        (SEQ_CAP,   False),
+        "Fill %":         (SEQ_FILL,  False),
+        "Runs":           (SEQ_RUNS,  False),
+    }
 
-    for col in SEQ_COLS | DIV_COLS:
+    for col, (stops, diverging) in COL_STOPS.items():
         vals = [r.get(f"_r_{col}") for r in rows if r.get(f"_r_{col}") is not None]
         if not vals:
             continue
@@ -1344,15 +1344,14 @@ def build_summary(events, live, type_lookup, pair_lookup, rebate_rate, active_id
             v = r.get(f"_r_{col}")
             if v is None:
                 continue
-            if col in DIV_COLS:
+            if diverging:
                 m = max(abs(vmin), abs(vmax)) or 1.0
                 t = 0.5 + (v / m) * 0.5
                 t = max(0.0, min(1.0, t))
-                color = _interp(t, DIV_STOPS)
             else:
                 t = (v - vmin) / (vmax - vmin) if vmax > vmin else 0.5
-                color = _interp(t, SEQ_STOPS)
-            r[col] = _wrap(str(r[col]), color)
+            r[f"_bg_{col}"] = _interp(t, stops)
+            r[f"_raw_{col}"] = v
 
     for r in rows:
         for k in list(r.keys()):
@@ -1674,7 +1673,65 @@ async def run(config: Config, context: ContextTypes.DEFAULT_TYPE) -> RoutineResu
             f"orchestration). PnL includes a {config.rebate_rate * 100:.3f}% maker rebate._"
         )
         builder.markdown("### Per-Controller Summary\n_Sorted by realized PnL + rebates. Active controllers show live cumulative volume/PnL; stopped ones show window-realized totals._")
-        builder.table(summary_rows, columns=SUMMARY_COLUMNS)
+        import html as _html_mod
+        _hdr = "".join(
+            '<th onclick="cpSort(' + str(i) + ',this)" style="cursor:pointer;background:#161b22;'
+            'color:#58a6ff;padding:6px 10px;border:1px solid #30363d;user-select:none;white-space:nowrap;">'
+            + _html_mod.escape(c) + '</th>'
+            for i, c in enumerate(SUMMARY_COLUMNS)
+        )
+        _body_rows = []
+        for _r in summary_rows:
+            _cells = []
+            for _c in SUMMARY_COLUMNS:
+                _v = _r.get(_c, "")
+                _disp = _html_mod.escape(str(_v)) if _v is not None else ""
+                _bg = _r.get(f"_bg_{_c}", "")
+                _raw = _r.get(f"_raw_{_c}", "")
+                _style = ("background:" + _bg + ";" if _bg else "") + "color:#e6edf3;padding:5px 10px;border:1px solid #21262d;white-space:nowrap;"
+                _dv = ' data-val="' + str(_raw) + '"' if _raw != "" else ""
+                _cells.append("<td" + _dv + ' style="' + _style + '">' + _disp + "</td>")
+            _body_rows.append("<tr>" + "".join(_cells) + "</tr>")
+        _tbl_css = (
+            '<style>.cpw input{width:220px;margin-bottom:8px;background:#0d1117;color:#c9d1d9;'
+            'border:1px solid #30363d;border-radius:4px;padding:4px 8px;}'
+            '.cpw table{border-collapse:collapse;width:100%;font-size:.88em;}'
+            '.cpw tr:hover td{filter:brightness(1.15);}</style>'
+        )
+        _tbl_js = (
+            '<script>(function(){'
+            'var _s={col:-1,asc:1};'
+            'window.cpFilter=function(inp){var q=inp.value.toLowerCase();'
+            'document.querySelectorAll("#cptbl tbody tr").forEach(function(r){'
+            'r.style.display=r.cells[0].textContent.toLowerCase().includes(q)?"":"none";});};'
+            'window.cpSort=function(i,th){'
+            'var asc=(_s.col===i)?-_s.asc:1;_s={col:i,asc:asc};'
+            'document.querySelectorAll("#cptbl thead th").forEach(function(h){'
+            'h.textContent=h.textContent.replace(/ [▲▼]$/,"");});'
+            'th.textContent+=asc>0?" ▲":" ▼";'
+            'var tb=document.querySelector("#cptbl tbody");'
+            'var rs=Array.from(tb.rows);'
+            'rs.sort(function(a,b){'
+            'var av=a.cells[i].dataset.val||a.cells[i].textContent,'
+            'bv=b.cells[i].dataset.val||b.cells[i].textContent,'
+            'an=parseFloat(av),bn=parseFloat(bv);'
+            'if(!isNaN(an)&&!isNaN(bn))return asc*(an-bn);'
+            'return asc*av.localeCompare(bv);});'
+            'rs.forEach(function(r){tb.appendChild(r);});};})()</script>'
+        )
+        _tbl_html = (
+            _tbl_css
+            + '<div class="cpw">'
+            + '<input type="search" placeholder="Filter by controller…" oninput="cpFilter(this)">'
+            + '<table id="cptbl"><thead><tr>' + _hdr + '</tr></thead>'
+            + '<tbody>' + "".join(_body_rows) + '</tbody></table></div>'
+            + _tbl_js
+        )
+        builder.markdown(_tbl_html)
+        for _r in summary_rows:
+            for _k in list(_r.keys()):
+                if _k.startswith("_bg_") or _k.startswith("_raw_"):
+                    del _r[_k]
 
         # Per-controller comparison bars — ALWAYS covers every controller (active +
         # stopped), unlike the executor time-series which needs closed executors.

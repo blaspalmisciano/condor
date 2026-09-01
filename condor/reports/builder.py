@@ -13,6 +13,18 @@ from . import rendering, store
 
 logger = logging.getLogger(__name__)
 
+
+class Html(str):
+    """Mark a string as pre-built HTML that should not be escaped in table cells."""
+
+
+_HEATMAP_CELL_RE = re.compile(
+    r'^<span\s+style="([^"]*)">(.*?)</span>$',
+    re.DOTALL,
+)
+_BG_COLOR_RE = re.compile(r"background:\s*([^;\"'\s][^;\"']*)")
+_FG_COLOR_RE = re.compile(r"(?:^|;)\s*color:\s*([^;\"'\s][^;\"']*)")
+
 _SECTION_PRIORITY = {
     "section_header": -1,
     "filter": 0,
@@ -406,6 +418,7 @@ class ReportBuilder:
         needs_plotly = any(
             section["type"] in {"plotly", "chart"} for section in self._sections
         )
+        has_static_tables = any(section["type"] == "table" for section in self._sections)
         meta_badges = ""
         if source_type:
             meta_badges += (
@@ -424,7 +437,7 @@ class ReportBuilder:
             plotly_script=rendering.plotly_script() if needs_plotly else "",
             report_runtime=(
                 f"<script>{rendering.report_runtime()}</script>"
-                if interactive_sections or self._auto_refresh_seconds is not None
+                if interactive_sections or self._auto_refresh_seconds is not None or has_static_tables
                 else ""
             ),
         )
@@ -544,17 +557,45 @@ class ReportBuilder:
 
     @staticmethod
     def _render_table(columns: list[str], rows: list[dict]) -> str:
-        header = "".join(f"<th>{html.escape(str(column))}</th>" for column in columns)
+        def _cell_parts(v: Any) -> tuple[str, str]:
+            """Return (plain_text, td_style) by extracting heatmap colors from Html spans."""
+            s = str(v)
+            m = _HEATMAP_CELL_RE.match(s)
+            if m:
+                style_str, inner = m.group(1), m.group(2)
+                bg = _BG_COLOR_RE.search(style_str)
+                fg = _FG_COLOR_RE.search(style_str)
+                if bg:
+                    td_style = f"background:{bg.group(1).strip()}"
+                    if fg:
+                        td_style += f";color:{fg.group(1).strip()}"
+                    return inner, td_style
+            if isinstance(v, Html):
+                return re.sub(r"<[^>]+>", "", s), ""
+            return s, ""
+
+        header = "".join(
+            f'<th data-field="{html.escape(str(col), quote=True)}" data-col="{i}">'
+            f"{html.escape(str(col))}</th>"
+            for i, col in enumerate(columns)
+        )
         body_rows = []
         for row in rows:
-            cells = "".join(
-                f"<td>{html.escape(str(row.get(column, '')))}</td>"
-                for column in columns
-            )
-            body_rows.append(f"<tr>{cells}</tr>")
+            cells = []
+            for column in columns:
+                v = row.get(column, "")
+                text, td_style = _cell_parts(v)
+                sort_val = html.escape(text, quote=True)
+                style_attr = f' style="{html.escape(td_style, quote=True)}"' if td_style else ""
+                cells.append(f'<td data-sort="{sort_val}"{style_attr}>{html.escape(text)}</td>')
+            body_rows.append(f"<tr>{''.join(cells)}</tr>")
         body = "\n".join(body_rows)
         return (
-            '<div class="section section-table"><table><thead><tr>'
+            '<div class="section section-table">'
+            '<div class="static-table-toolbar">'
+            '<input type="search" class="static-table-search" placeholder="Filter by controller…">'
+            "</div>"
+            "<table><thead><tr>"
             f"{header}</tr></thead><tbody>{body}</tbody></table></div>"
         )
 
