@@ -69,7 +69,8 @@ class Config(BaseModel):
     max_controllers: int = Field(default=6, description="max live controllers to sweep per lap")
     only_pair: str = Field(default="", description="filter to one trading pair, e.g. BTC-BRL (blank = all)")
     min_uplift: float = Field(default=0.5, description="min risk-adj uplift over base to propose")
-    frequency_sec: int = Field(default=43200, description="seconds between laps (43200 = twice daily)")
+    frequency_sec: int = Field(default=43200, description="fixed interval between laps when run_at_hours is blank (43200 = 12h); the lap's own runtime is subtracted so spacing stays exact")
+    run_at_hours: str = Field(default="02:00,14:00", description="clock times (machine tz) to START each lap; laps finish ~3-4h later. Blank = use frequency_sec instead.")
     sweep_window_hours: int = Field(default=4, description="backtest window per reshape lap (4h ≈ 3-4h/lap)")
     max_laps: int = Field(default=0, description="stop after N laps (0 = run forever)")
     dry_run: bool = Field(default=False, description="if True, propose text only (no Deploy button)")
@@ -87,6 +88,29 @@ def _save(path, obj):
     tmp = path + ".tmp"
     json.dump(obj, open(tmp, "w"), default=str)
     os.replace(tmp, path)
+
+
+def _next_target_seconds(hhmm_csv: str) -> int:
+    """Seconds until the next clock target (machine-local tz). Anchors laps to fixed
+    times of day so a proposal lands by a predictable hour, instead of drifting."""
+    import datetime as _dt
+    now = _dt.datetime.now()
+    targets = []
+    for hm in (hhmm_csv or "").split(","):
+        hm = hm.strip()
+        if not hm:
+            continue
+        try:
+            h, m = map(int, hm.split(":"))
+        except Exception:
+            continue
+        t = now.replace(hour=h, minute=m, second=0, microsecond=0)
+        if t <= now:
+            t += _dt.timedelta(days=1)
+        targets.append(t)
+    if not targets:
+        return 0
+    return max(1, int((min(targets) - now).total_seconds()))
 
 
 def _clean_live_config(cfg: dict) -> dict:
@@ -747,7 +771,10 @@ async def run(config: Config, context: ContextTypes.DEFAULT_TYPE) -> RoutineResu
     lap = 0
     try:
         while True:
+            if (config.run_at_hours or "").strip():
+                await asyncio.sleep(_next_target_seconds(config.run_at_hours))  # anchor to clock time
             lap += 1
+            lap_start = time.time()
             logs = []
             try:
                 last = await _reshape_lap(config, live, local, lambda m: logs.append(str(m)))
@@ -767,7 +794,9 @@ async def run(config: Config, context: ContextTypes.DEFAULT_TYPE) -> RoutineResu
                 logs.append(f"send error: {e}")
             if config.max_laps and lap >= config.max_laps:
                 break
-            await asyncio.sleep(config.frequency_sec)
+            if not (config.run_at_hours or "").strip():
+                elapsed = time.time() - lap_start
+                await asyncio.sleep(max(60, config.frequency_sec - elapsed))  # exact interval: subtract runtime
     except asyncio.CancelledError:
         return RoutineResult(text=f"PMM Autopilot stopped after {lap} lap(s).")
     finally:
