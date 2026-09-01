@@ -249,6 +249,9 @@ def _proposal_keyboard(proposals):
     callback_data routes to this routine's handle_callback:
     routines:pmm_autopilot:{deploy|reject}:{proposal_id} (<64 bytes)."""
     rows = []
+    if len(proposals) > 1:
+        rows.append([InlineKeyboardButton(f"🚀 Deploy ALL ({len(proposals)})",
+                                          callback_data="routines:pmm_autopilot:deploy_all:all")])
     for p in proposals:
         pid = p["proposal_id"]
         rows.append([
@@ -259,17 +262,62 @@ def _proposal_keyboard(proposals):
     return InlineKeyboardMarkup(rows) if rows else None
 
 
+async def _apply_proposal(live, p) -> tuple[bool, str]:
+    """Apply one proposal's tuned params to its live controller in place."""
+    cid = p["controller_id"]
+    cfg = dict(p["full_config"])
+    cfg["id"] = cid
+    cfg.setdefault("controller_name", "pmm_mister")
+    try:
+        res = await live.controllers.update_bot_controller_config(
+            bot_name=p.get("bot"), controller_name=cid, config=cfg)
+        ok = (res.get("status") == "success") if isinstance(res, dict) else bool(res)
+        return ok, (str(res)[:200])
+    except Exception as e:
+        return False, str(e)[:200]
+
+
 async def handle_callback(update, context, action, params):
-    """M4 — human approval gate. Applies a proposal's tuned params to the LIVE
-    controller in place (update_bot_controller_config), only on an explicit press."""
+    """M4 — human approval gate. Applies proposals' tuned params to the LIVE
+    controllers in place (update_bot_controller_config), only on an explicit press."""
     query = update.callback_query
-    pid = params[0] if params else None
     store = _load(PROPOSAL_STORE)
+    base_text = (query.message.text if query.message else "") or ""
+    chat_id = getattr(context, "_chat_id", None) or (query.message.chat_id if query.message else None)
+
+    # ---- Deploy EVERYTHING: apply every still-open proposal at once ----
+    if action == "deploy_all":
+        todo = [pp for pp in store.values() if pp.get("status") == "proposed"]
+        if not todo:
+            await query.answer("No open proposals to deploy.", show_alert=True)
+            return
+        await query.answer(f"Deploying all {len(todo)} proposals…")
+        live = await get_client(chat_id, context=context)
+        ok_n, fails = 0, []
+        for pp in todo:
+            ok, info = await _apply_proposal(live, pp)
+            pp["status"] = "deployed" if ok else "deploy_failed"
+            pp["deploy_result"] = info
+            store[pp["proposal_id"]] = pp
+            ok_n += 1 if ok else 0
+            if not ok:
+                fails.append(pp["controller_id"])
+        _save(PROPOSAL_STORE, store)
+        tail = f"\n\n🚀 *Deployed {ok_n}/{len(todo)}* proposals to the live fleet."
+        if fails:
+            tail += "\n⚠️ failed: " + ", ".join(f"`{c}`" for c in fails[:8])
+        try:
+            await query.edit_message_text(base_text + tail, parse_mode="Markdown")
+        except Exception:
+            if chat_id and getattr(context, "bot", None):
+                await context.bot.send_message(chat_id=chat_id, text=tail, parse_mode="Markdown")
+        return
+
+    pid = params[0] if params else None
     p = store.get(pid)
     if not p:
         await query.answer("Proposal expired or already handled.", show_alert=True)
         return
-    base_text = (query.message.text if query.message else "") or ""
 
     if action == "reject":
         p["status"] = "rejected"
@@ -287,33 +335,18 @@ async def handle_callback(update, context, action, params):
             await query.answer("Already deployed.", show_alert=True)
             return
         await query.answer("Deploying to the live controller…")
-        chat_id = getattr(context, "_chat_id", None) or (query.message.chat_id if query.message else None)
         live = await get_client(chat_id, context=context)
-        cid = p["controller_id"]
-        bot = p.get("bot")
-        cfg = dict(p["full_config"])
-        cfg["id"] = cid                       # in-place update keeps the live id
-        cfg.setdefault("controller_name", "pmm_mister")
+        ok, info = await _apply_proposal(live, p)
+        p["status"] = "deployed" if ok else "deploy_failed"
+        p["deploy_result"] = info
+        store[pid] = p
+        _save(PROPOSAL_STORE, store)
+        tail = (f"\n\n✅ *Deployed* `{p['label']}` → `{p['controller_id']}` on `{p.get('bot')}`"
+                if ok else f"\n\n⚠️ deploy returned: `{info[:150]}`")
         try:
-            res = await live.controllers.update_bot_controller_config(
-                bot_name=bot, controller_name=cid, config=cfg)
-            ok = (res.get("status") == "success") if isinstance(res, dict) else bool(res)
-            p["status"] = "deployed" if ok else "deploy_failed"
-            p["deploy_result"] = str(res)[:300]
-            store[pid] = p
-            _save(PROPOSAL_STORE, store)
-            tail = (f"\n\n✅ *Deployed* `{p['label']}` → `{cid}` on `{bot}`"
-                    if ok else f"\n\n⚠️ deploy returned: `{str(res)[:150]}`")
             await query.edit_message_text(base_text + tail, parse_mode="Markdown")
-        except Exception as e:
-            p["status"] = "deploy_error"
-            store[pid] = p
-            _save(PROPOSAL_STORE, store)
-            try:
-                await query.edit_message_text(base_text + f"\n\n⚠️ deploy error: `{str(e)[:150]}`",
-                                              parse_mode="Markdown")
-            except Exception:
-                pass
+        except Exception:
+            pass
 
 
 async def run(config: Config, context: ContextTypes.DEFAULT_TYPE) -> RoutineResult:
