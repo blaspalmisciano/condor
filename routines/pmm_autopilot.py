@@ -69,9 +69,10 @@ class Config(BaseModel):
     max_controllers: int = Field(default=6, description="max live controllers to sweep per lap")
     only_pair: str = Field(default="", description="filter to one trading pair, e.g. BTC-BRL (blank = all)")
     min_uplift: float = Field(default=0.5, description="min risk-adj uplift over base to propose")
-    frequency_sec: int = Field(default=3600, description="seconds between laps (continuous mode)")
+    frequency_sec: int = Field(default=43200, description="seconds between laps (43200 = twice daily)")
+    sweep_window_hours: int = Field(default=4, description="backtest window per reshape lap (4h ≈ 3-4h/lap)")
     max_laps: int = Field(default=0, description="stop after N laps (0 = run forever)")
-    dry_run: bool = Field(default=True, description="M1-3: propose only; the deploy button is wired in M4")
+    dry_run: bool = Field(default=False, description="if True, propose text only (no Deploy button)")
 
 
 def _load(path):
@@ -500,6 +501,236 @@ async def handle_callback(update, context, action, params):
             pass
 
 
+# ---------------------------------------------------------------------------
+# Reshape lap: sweep the whole live fleet, pool variants, propose the top-N,
+# send it to Telegram (proposal + Deploy button + current-generation HTML).
+# ---------------------------------------------------------------------------
+
+def _read_token():
+    import re
+    try:
+        for line in open("/Users/blaspalmisciano/condor/.env"):
+            m = re.match(r'\s*TELEGRAM_TOKEN\s*=\s*"?([^"\s]+)', line)
+            if m:
+                return m.group(1)
+    except Exception:
+        return None
+
+
+def _reshape_keyboard():
+    return {"inline_keyboard": [[{"text": "🔄 Apply reshape",
+                                  "callback_data": "routines:pmm_autopilot:reshape:go"}]]}
+
+
+def _tg_send_message(chat_id, text, reply_markup=None, token=None):
+    import json as _j, urllib.request as _u
+    token = token or _read_token()
+    d = {"chat_id": chat_id, "text": text}       # plaintext — no parse_mode (avoids 400s)
+    if reply_markup:
+        d["reply_markup"] = _j.dumps(reply_markup)
+    req = _u.Request(f"https://api.telegram.org/bot{token}/sendMessage",
+                     data=_j.dumps(d).encode(), headers={"Content-Type": "application/json"})
+    try:
+        return _j.load(_u.urlopen(req, timeout=30)).get("ok")
+    except Exception:
+        return False
+
+
+def _tg_send_document(chat_id, path, caption="", token=None):
+    import json as _j, urllib.request as _u, os as _o
+    token = token or _read_token()
+    boundary = "----pmmauto" + str(int(time.time()))
+    with open(path, "rb") as f:
+        content = f.read()
+    fn = _o.path.basename(path)
+    parts = []
+
+    def add(name, val):
+        parts.append((f'--{boundary}\r\nContent-Disposition: form-data; name="{name}"\r\n\r\n{val}\r\n').encode())
+    add("chat_id", str(chat_id))
+    if caption:
+        add("caption", caption[:1000])
+    parts.append((f'--{boundary}\r\nContent-Disposition: form-data; name="document"; filename="{fn}"\r\n'
+                  f'Content-Type: text/html\r\n\r\n').encode() + content + b"\r\n")
+    parts.append(f"--{boundary}--\r\n".encode())
+    req = _u.Request(f"https://api.telegram.org/bot{token}/sendDocument", data=b"".join(parts),
+                     headers={"Content-Type": f"multipart/form-data; boundary={boundary}"})
+    try:
+        return _j.load(_u.urlopen(req, timeout=180)).get("ok")
+    except Exception:
+        return False
+
+
+def _reshape_summary_text(selected, plan, fleet):
+    from collections import Counter
+    if not selected:
+        return "🔄 PMM Autopilot — no reshape proposal this lap (fleet already optimal)."
+    fam = Counter(_family(c["origin"]) for c in selected)
+    top = sorted(selected, key=lambda c: -c.get("est_volume", c["volume"]))[:5]
+    cap = sum(c.get("autosized_capital", c["capital"]) for c in selected)
+    lines = [f"🔄 PMM Autopilot — reshape proposal ({fleet['N']} live controllers, {cap:,.0f} BRL)",
+             f"keep {len(plan['keep'])} · deploy {len(plan['deploy'])} · retire {len(plan['retire'])}",
+             f"families: {', '.join(f'{f}×{n}' for f, n in fam.most_common())}", "", "Top 5 by est. volume:"]
+    for i, c in enumerate(top, 1):
+        lines.append(f"  {i}. {c['cand_id']}  ~{c.get('est_volume', c['volume']):,} vol")
+    lines += ["", "Press Apply reshape to stop the old bot and deploy this top-"
+              f"{len(selected)} set. Ignore it and the next lap proposes again. Nothing happens until you press."]
+    return "\n".join(lines)
+
+
+async def _build_gen_report(pool, fleet, selected):
+    """Current-generation HTML: volume curves + PnL curves (joined from sweep cache)
+    + PnL-vs-volume scatter + leaderboards. Returns the saved HTML path (or None)."""
+    import glob, json as _j
+    from datetime import datetime as _dtc, timezone as _tz
+    import plotly.graph_objects as go
+    from condor.reports import ReportBuilder
+    curve_idx = {}
+    for f in glob.glob("data/pmm_sweep_store*.json"):
+        try:
+            store = _j.load(open(f))
+        except Exception:
+            continue
+        for _sk, trials in store.items():
+            for _tid, t in trials.items():
+                if isinstance(t, dict) and t.get("pnl_curve"):
+                    biz = (t.get("realized", 0) + t.get("unrealized", 0)) + t.get("volume", 0) * 0.00015
+                    curve_idx.setdefault((round(t.get("volume", 0)), round(biz, 1), round(t.get("max_dd", 0), 1)), t)
+    live_ids = set((fleet.get("controllers") or {}).keys())
+    inpool = [c for c in pool if c["origin"] in live_ids]
+    win_ids = {c["cand_id"] for c in selected}
+    base_ids = {c["cand_id"] for c in inpool if c.get("is_base")}
+    for c in inpool:
+        t = curve_idx.get((round(c["volume"]), round(c["biz"], 1), round(c["max_dd"], 1)))
+        c["pnl_curve"], c["vol_curve"] = (t.get("pnl_curve"), t.get("vol_curve")) if t else (None, None)
+    DARK = dict(paper_bgcolor="#0d1117", plot_bgcolor="#161b22", font=dict(color="#c9d1d9", size=12))
+    PAL = ["#58a6ff", "#f0883e", "#3fb950", "#a371f7", "#e3b341", "#56d4dd", "#ff7b72", "#7ee787"]
+    def dtx(ts):
+        return _dtc.fromtimestamp(float(ts), tz=_tz.utc)
+    def overlay(metric, title, ylab):
+        key = "pnl_curve" if metric == "pnl" else "vol_curve"
+        fig = go.Figure(); first = True
+        for c in inpool:
+            if c["cand_id"] in base_ids and c.get(key):
+                fig.add_trace(go.Scatter(x=[dtx(a) for a, _ in c[key]], y=[v for _, v in c[key]],
+                    line=dict(width=1, color="#8b949e"), opacity=0.4, name="current live",
+                    legendgroup="base", showlegend=first, hovertext=c["cand_id"], hoverinfo="text+y"))
+                first = False
+        for i, c in enumerate(sorted([c for c in inpool if c["cand_id"] in win_ids and c.get(key)],
+                                     key=lambda c: -c["volume"])[:8]):
+            fig.add_trace(go.Scatter(x=[dtx(a) for a, _ in c[key]], y=[v for _, v in c[key]],
+                line=dict(width=2.2, color=PAL[i % len(PAL)]), name=f"★ {c['cand_id'][:26]}",
+                hovertext=c["cand_id"], hoverinfo="text+y"))
+        if metric == "pnl":
+            fig.add_hline(y=0, line_dash="dot", line_color="white", opacity=0.3)
+        fig.update_layout(**DARK, height=520, title=title, margin=dict(l=60, r=20, t=70, b=40),
+                          legend=dict(orientation="h", y=1.02, x=0, font=dict(size=9)))
+        fig.update_xaxes(gridcolor="#21262d"); fig.update_yaxes(gridcolor="#21262d", title=ylab)
+        return fig
+    def scatter():
+        fig = go.Figure()
+        others = [c for c in inpool if c["cand_id"] not in win_ids and c["cand_id"] not in base_ids]
+        fig.add_trace(go.Scatter(x=[c["volume"] for c in others], y=[c["biz"] for c in others], mode="markers",
+            name=f"all variants ({len(others)})", marker=dict(size=6, color="rgba(139,148,158,0.45)"),
+            text=[c["cand_id"] for c in others], hovertemplate="%{text}<br>vol %{x:,.0f}<br>biz %{y:.1f}<extra></extra>"))
+        bs = [c for c in inpool if c["cand_id"] in base_ids]
+        fig.add_trace(go.Scatter(x=[c["volume"] for c in bs], y=[c["biz"] for c in bs], mode="markers",
+            name="current live (base)", marker=dict(size=10, color="#8b949e", symbol="square", line=dict(width=1, color="#fff")),
+            text=[c["cand_id"] for c in bs], hovertemplate="%{text}<br>vol %{x:,.0f}<br>biz %{y:.1f}<extra></extra>"))
+        ws = [c for c in inpool if c["cand_id"] in win_ids]
+        fig.add_trace(go.Scatter(x=[c["volume"] for c in ws], y=[c["biz"] for c in ws], mode="markers",
+            name=f"new generation ★ ({len(ws)})", marker=dict(size=13, color="#3fb950", symbol="star", line=dict(width=1, color="#fff")),
+            text=[c["cand_id"] for c in ws], hovertemplate="%{text}<br>vol %{x:,.0f}<br>biz %{y:.1f}<extra></extra>"))
+        fig.add_hline(y=0, line_dash="dot", line_color="white", opacity=0.3)
+        fig.update_layout(**DARK, height=560, title="PnL vs Volume — every variant; ★ = new generation",
+                          margin=dict(l=60, r=20, t=70, b=50), legend=dict(orientation="h", y=1.02, x=0))
+        fig.update_xaxes(gridcolor="#21262d", title="Cumulative volume (BRL)")
+        fig.update_yaxes(gridcolor="#21262d", title="Business PnL (BRL)")
+        return fig
+    if not inpool:
+        return None
+    topvol = sorted(inpool, key=lambda c: -c["volume"])[:12]
+    topbiz = sorted(inpool, key=lambda c: -c["biz"])[:12]
+    b = ReportBuilder("BTC-BRL Fleet — Current Generation Sweep (1s)")
+    b.source("routine", "pmm_autopilot").tags(["pmm_mister", "sweep", "btcbrl", "1s", "reshape"])
+    b.manual_order()
+    b.kpi("Live controllers", str(fleet["N"])); b.kpi("Variants pooled", str(len(inpool)))
+    b.kpi("New-gen winners", str(len(selected))); b.kpi("Best volume", f"{max(c['volume'] for c in inpool):,.0f}")
+    b.markdown(f"# BTC-BRL fleet — current generation sweep\n_1-second backtests across the **{fleet['N']} live "
+               f"pmm controllers**, every variant pooled ({len(inpool)}). Faded gray = current live; ★ = the "
+               f"winners the agent selected for the next generation._")
+    b.markdown("## Cumulative volume — winners vs current live")
+    b.plotly(overlay("vol", "Cumulative volume (BRL) — ★ new generation vs current live", "Cumulative volume (BRL)"))
+    b.markdown("## Market PnL — winners vs current live")
+    b.plotly(overlay("pnl", "Market PnL, mark-to-market (BRL) — ★ new generation vs current live", "Market PnL (BRL)"))
+    b.markdown("## PnL vs Volume frontier")
+    b.plotly(scatter())
+    b.markdown("## 🏆 Top 12 by volume")
+    b.table([{"#": str(i), "Candidate": c["cand_id"], "Volume": f"{c['volume']:,.0f}", "Business PnL": f"{c['biz']:+.1f}",
+              "MaxDD": f"{c['max_dd']}", "New gen": "★" if c["cand_id"] in win_ids else ""} for i, c in enumerate(topvol, 1)],
+             columns=["#", "Candidate", "Volume", "Business PnL", "MaxDD", "New gen"])
+    b.markdown("## 💰 Top 12 by business PnL")
+    b.table([{"#": str(i), "Candidate": c["cand_id"], "Business PnL": f"{c['biz']:+.1f}", "Volume": f"{c['volume']:,.0f}",
+              "MaxDD": f"{c['max_dd']}", "New gen": "★" if c["cand_id"] in win_ids else ""} for i, c in enumerate(topbiz, 1)],
+             columns=["#", "Candidate", "Business PnL", "Volume", "MaxDD", "New gen"])
+    rid = await b.save()
+    hits = sorted(glob.glob(f"reports/*{rid}*.html"), key=lambda p: -os.path.getmtime(p))
+    return hits[0] if hits else None
+
+
+async def _reshape_lap(config: Config, live, local, log) -> dict:
+    """One reshape lap: sweep the whole live pmm fleet on local, pool every variant,
+    snapshot the fleet, and select the global top-N. Writes POOL_STORE + FLEET_STORE."""
+    live_perf, cfg_by, bot_names, health, cid_bot = await gather_active(live)
+    ctrls = [(cid, c) for cid, c in cfg_by.items()
+             if cid in live_perf and (_clean_live_config(c).get("controller_name") == "pmm_mister")]
+    if config.only_pair:
+        ctrls = [(cid, c) for cid, c in ctrls if (c.get("trading_pair", "").upper() == config.only_pair.upper())]
+    if not ctrls:
+        return {"selected": [], "plan": {}, "fleet": {}, "summary": "No live pmm_mister controllers to optimize."}
+    ctrls.sort(key=lambda kv: -live_perf.get(kv[0], {}).get("volume_traded", 0.0))
+    fleet = {cid: {"bot": cid_bot.get(cid),
+                   "capital": float(_clean_live_config(c).get("total_amount_quote") or 0),
+                   "live_vol": live_perf.get(cid, {}).get("volume_traded", 0)} for cid, c in ctrls}
+    total_cap = sum(f["capital"] for f in fleet.values())
+    fsnap = {"N": len(ctrls), "total_capital": total_cap, "controllers": fleet}
+    _save(FLEET_STORE, fsnap)
+    w1 = int(time.time()) - 300
+    w0 = w1 - config.sweep_window_hours * 3600
+    scfg = SweepConfig(resolution=config.resolution, days=1)
+    cfgobj = type("SweepCfg", (), {"window_hours": config.sweep_window_hours, "resolution": config.resolution})()
+    pool = []
+    for cid, base_cfg in ctrls:
+        bc = _clean_live_config(dict(base_cfg)); bc.setdefault("id", cid)
+        cap = float(bc.get("total_amount_quote") or 0)
+        try:
+            swept = await _sweep_controller(local, cid, bc, w0, w1, scfg, cfgobj, log)
+        except Exception as e:
+            log(f"{cid} sweep error: {e}")
+            continue
+        if not swept:
+            continue
+        base_t, best, ok, axes = swept
+        for t in ok:
+            lbl = _tlabel(t, axes) or "BASE"
+            params = t.get("params") or {}
+            fc = apply_params(bc, params, axes)
+            nid = cid if not params else f"{cid}__{lbl.lower().replace(' ', '_').replace('×', 'x')}"
+            fc["id"] = nid
+            pool.append({"origin": cid, "label": lbl, "params": params, "cand_id": nid,
+                         "volume": round(t["volume"]), "biz": round(t["_biz"], 2),
+                         "max_dd": round(t["max_dd"], 1), "capital": cap, "bot": cid_bot.get(cid),
+                         "full_config": fc, "is_base": not params})
+        _save(POOL_STORE, pool)
+        log(f"{cid}: pooled +{len(ok)} variants")
+    if not pool:
+        return {"selected": [], "plan": {}, "fleet": fsnap, "summary": "Sweep produced no candidates."}
+    selected = select_topN(pool, fsnap, budget=total_cap)
+    plan = plan_reshape(selected, fsnap)
+    return {"selected": selected, "plan": plan, "fleet": fsnap, "pool": pool,
+            "summary": _reshape_summary_text(selected, plan, fsnap)}
+
+
 async def run(config: Config, context: ContextTypes.DEFAULT_TYPE) -> RoutineResult:
     chat_id = getattr(context, "_chat_id", None)
     live = await get_client(chat_id, context=context)  # brigado — READ ONLY
@@ -510,25 +741,30 @@ async def run(config: Config, context: ContextTypes.DEFAULT_TYPE) -> RoutineResu
         timeout=ClientTimeout(total=1800, connect=15))
     await local.init()
 
-    snaps = _load(SNAP_STORE)
-    last = {"analyses": [], "proposals": [], "summary": "no lap yet"}
+    chat_id = chat_id or 6310433268
+    token = _read_token()
+    last = {"selected": [], "plan": {}, "fleet": {}, "summary": "no lap yet"}
     lap = 0
     try:
         while True:
             lap += 1
             logs = []
             try:
-                last = await _one_lap(config, live, local, snaps, lambda m: logs.append(str(m)))
+                last = await _reshape_lap(config, live, local, lambda m: logs.append(str(m)))
             except Exception as e:
-                last = {"analyses": [], "proposals": [], "summary": f"⚠️ lap {lap} error: {e}"}
-            # notify the chat if a bot is available; attach approval buttons for proposals
+                last = {"selected": [], "plan": {}, "fleet": {}, "summary": f"⚠️ lap {lap} error: {e}"}
+            # send the proposal + Deploy button, then the current-generation HTML report
             try:
-                if chat_id and getattr(context, "bot", None):
-                    kb = None if config.dry_run else _proposal_keyboard(last.get("proposals", []))
-                    await context.bot.send_message(chat_id=chat_id, text=last["summary"],
-                                                   parse_mode="Markdown", reply_markup=kb)
-            except Exception:
-                pass
+                rm = _reshape_keyboard() if (last.get("selected") and not config.dry_run) else None
+                _tg_send_message(chat_id, last["summary"], reply_markup=rm, token=token)
+                if last.get("selected"):
+                    html = await _build_gen_report(last.get("pool") or _load(POOL_STORE),
+                                                   last["fleet"], last["selected"])
+                    if html:
+                        _tg_send_document(chat_id, html,
+                                          caption="Current generation — ★ winners vs live", token=token)
+            except Exception as e:
+                logs.append(f"send error: {e}")
             if config.max_laps and lap >= config.max_laps:
                 break
             await asyncio.sleep(config.frequency_sec)
@@ -540,13 +776,11 @@ async def run(config: Config, context: ContextTypes.DEFAULT_TYPE) -> RoutineResu
         except Exception:
             pass
 
-    a = last["analyses"]
+    live_ids = set((last.get("fleet", {}).get("controllers") or {}).keys())
     rows = [{
-        "Controller": x["controller_id"], "Pair": x["pair"], "Variants": x["n_trials"],
-        "Base risk-adj": x["base_risk_adj"], "Best": x["best_label"],
-        "Best risk-adj": x["best_risk_adj"], "Uplift": x["uplift"],
-        "Trust": ("warm-up" if x["trust"] is None else x["trust"]),
-        "Action": "propose" if x["proposed"] else "hold",
-    } for x in a]
-    cols = ["Controller", "Pair", "Variants", "Base risk-adj", "Best", "Best risk-adj", "Uplift", "Trust", "Action"]
+        "Candidate": c["cand_id"], "Volume": f"{c['volume']:,.0f}", "Business PnL": f"{c['biz']:+.1f}",
+        "Autosized cap": f"{c.get('autosized_capital', c['capital']):,.0f}",
+        "Status": "keep" if c["cand_id"] in live_ids else "deploy",
+    } for c in last.get("selected", [])]
+    cols = ["Candidate", "Volume", "Business PnL", "Autosized cap", "Status"]
     return RoutineResult(text=last["summary"], table_data=rows or None, table_columns=cols if rows else None)
