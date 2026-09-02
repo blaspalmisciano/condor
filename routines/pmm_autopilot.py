@@ -74,6 +74,8 @@ class Config(BaseModel):
     sweep_window_hours: int = Field(default=4, description="backtest window per reshape lap (4h ≈ 3-4h/lap)")
     max_laps: int = Field(default=0, description="stop after N laps (0 = run forever)")
     dry_run: bool = Field(default=False, description="if True, propose text only (no Deploy button)")
+    deploy_image: str = Field(default="hummingbot/hummingbot:latest", description="container image for a reshape deploy (pin a @sha256 digest for reproducibility)")
+    credentials_profile: str = Field(default="master_account", description="account/credentials profile the reshape deploys under")
 
 
 def _load(path):
@@ -321,7 +323,17 @@ def select_topN(pool: list, fleet: dict, budget: float = None, max_per_family: i
         selected.append(c)
         seen.add(c["cand_id"])
         fam_count[fam] = fam_count.get(fam, 0) + 1
-    # autosize to spend the budget: equal share per controller
+    # backfill toward N from the ranked remainder (relaxing the family cap) so the fleet
+    # keeps its size and we don't over-capitalize a handful of survivors
+    if len(selected) < N:
+        for c in dedup:
+            if len(selected) >= N:
+                break
+            if c["cand_id"] in seen:
+                continue
+            selected.append(c)
+            seen.add(c["cand_id"])
+    # autosize to spend the budget: equal share per controller (sum <= budget by construction)
     per = round(budget / max(1, len(selected)), 2) if selected else 0.0
     for c in selected:
         c["autosized_capital"] = per
@@ -345,15 +357,99 @@ def plan_reshape(selected: list, fleet: dict) -> dict:
             "N": int(fleet.get("N") or 0), "n_selected": len(selected)}
 
 
-async def _execute_reshape(live, selected: list, fleet: dict, ts: str) -> dict:
-    """Apply the fleet reshape: save each selected config, deploy ONE new bot running
-    the top-N controllers, then stop+archive the old bots. Fleet count stays = N.
-    Returns a step-by-step status. High-consequence: stops live bots, redeploys."""
+def _bot_is_pmm_mister_only(bot_ctrls: dict, bot: str) -> bool:
+    """A bot is safe to stop ONLY IF we can see its FULL controller set and every
+    controller on it is pmm_mister. Missing/empty info → NOT safe (refuse)."""
+    entries = (bot_ctrls or {}).get(bot)
+    if not entries:  # unknown set → never stop (fail closed)
+        return False
+    return all((e.get("type") or "") == "pmm_mister" for e in entries)
+
+
+async def _wallet_fit_gate(live, selected: list):
+    """Two-sided wallet fit (audit P0.1). Confirms the selected set funds on BOTH legs
+    (quote cash + base inventory) of the shared wallet. FAIL-SAFE: any error or missing
+    balance → refuse the deploy, never proceed."""
+    try:
+        from routines.pmm_sweep import fits_budget
+        pair = (selected[0]["full_config"].get("trading_pair") or "").upper()
+        parts = pair.split("-")
+        base_tok, quote_tok = (parts + ["", ""])[0], (parts + ["", ""])[1]
+        st = await live.portfolio.get_state()
+        toks = {}
+        for _acct, venues in (st or {}).items():
+            if not isinstance(venues, dict):
+                continue
+            for _venue, rows in venues.items():
+                for r in (rows or []):
+                    toks[(r.get("token") or "").upper()] = r
+        q = toks.get(quote_tok, {}); b = toks.get(base_tok, {})
+        avail_quote = float(q.get("available_units") or q.get("units") or 0.0)
+        bp = float(b.get("price") or 0.0); qp = float(q.get("price") or 1.0) or 1.0
+        avail_base_quote = float(b.get("available_units") or 0.0) * (bp / qp)
+        cand_amounts = [(float(c.get("autosized_capital") or c.get("capital") or 0.0),
+                         c["full_config"].get("target_base_pct")) for c in selected]
+        fit = fits_budget(cand_amounts, avail_quote, avail_base_quote)
+        if not fit.get("fits"):
+            return False, (f"wallet cannot fund both legs (quote {fit['quote_need']:,.0f}/{fit['quote_avail']:,.0f}, "
+                           f"base {fit['base_need']:,.0f}/{fit['base_avail']:,.0f})")
+        return True, "wallet fit ok"
+    except Exception as e:
+        return False, f"wallet balances unavailable — refusing deploy ({str(e)[:80]})"
+
+
+async def _execute_reshape(live, selected: list, fleet: dict, ts: str, config=None) -> dict:
+    """Apply the fleet reshape: save the selected configs, deploy ONE new bot running the
+    top-N, then stop+archive the OLD bots. Fleet count stays = N.
+
+    SAFETY (in order): (0) empty guard; (1) HARD INVARIANT — never stop a bot that hosts
+    ANY non-pmm_mister controller (rebate_mill/pmm_king/co-hosted); (2) two-sided wallet
+    fit; (3) capture archived configs for rollback; then save → stop → deploy, with
+    rollback of the archived configs if the deploy fails.
+    """
     steps = []
     instance = f"pmm-autopilot-{ts}"
+    img = getattr(config, "deploy_image", None) or "hummingbot/hummingbot:latest"
+    profile = getattr(config, "credentials_profile", None) or "master_account"
+    bot_ctrls = fleet.get("bot_ctrls") or {}
+
+    # (0) empty selection → do nothing
+    if not selected:
+        return {"ok": False, "steps": ["empty selection — nothing to deploy"],
+                "instance": instance, "aborted": "empty selection"}
+
+    # (1) HARD INVARIANT: only stop bots that are EXCLUSIVELY pmm_mister. Any bot hosting a
+    # non-pmm_mister controller (rebate_mill / pmm_king / co-hosted) is REFUSED — left
+    # running — and its candidates are dropped from this reshape.
+    fleet_bots = sorted({info.get("bot") for info in (fleet.get("controllers") or {}).values() if info.get("bot")})
+    refused = [b for b in fleet_bots if not _bot_is_pmm_mister_only(bot_ctrls, b)]
+    safe_bots = [b for b in fleet_bots if b not in refused]
+    for b in refused:
+        types = sorted({(e.get("type") or "?") for e in (bot_ctrls.get(b) or [])}) or ["unknown"]
+        steps.append(f"🛡️ REFUSED bot `{b}` — hosts non-pmm_mister ({', '.join(types)}); left running")
+    # drop candidates whose origin lives on a refused bot
+    selected = [c for c in selected if c.get("bot") in safe_bots]
+    if not selected or not safe_bots:
+        return {"ok": False, "steps": steps + ["no pmm_mister-only bot to reshape after invariant filter"],
+                "instance": instance, "aborted": "invariant: nothing safe to reshape"}
     names = [c["cand_id"] for c in selected]
-    budget = float(fleet.get("total_capital") or 0.0)
-    # 1) save every selected config
+    budget = sum(float(c.get("autosized_capital") or c.get("capital") or 0.0) for c in selected)
+
+    # (2) two-sided wallet fit — refuse if it can't fund both legs (or can't be checked)
+    fit_ok, fit_msg = await _wallet_fit_gate(live, selected)
+    steps.append(("✅ " if fit_ok else "🛑 ") + fit_msg)
+    if not fit_ok:
+        return {"ok": False, "steps": steps, "instance": instance, "aborted": "wallet fit"}
+
+    # (3) capture archived configs for rollback BEFORE stopping anything
+    archived = {}
+    for b in safe_bots:
+        try:
+            archived[b] = await live.controllers.get_bot_controller_configs(b) or []
+        except Exception as e:
+            steps.append(f"⚠️ could not snapshot `{b}` for rollback: {str(e)[:60]}")
+
+    # save every selected config
     saved = 0
     for c in selected:
         try:
@@ -364,33 +460,51 @@ async def _execute_reshape(live, selected: list, fleet: dict, ts: str) -> dict:
     steps.append(f"saved {saved}/{len(selected)} configs")
     if saved < len(selected):
         return {"ok": False, "steps": steps, "instance": instance, "aborted": "not all configs saved"}
-    # 2) STOP the old bots FIRST — frees their capital so the new fleet can fund
-    #    (deploy-then-stop would double pmm capital and blow past liquid BRL).
-    old_bots = sorted({info.get("bot") for info in (fleet.get("controllers") or {}).values() if info.get("bot")})
+
+    # stop only the SAFE (pmm_mister-only) old bots
     stopped = []
-    for b in old_bots:
+    for b in safe_bots:
         try:
             await live.bot_orchestration.stop_and_archive_bot(
                 bot_name=b, skip_order_cancellation=True, archive_locally=True)
             stopped.append(b)
         except Exception as e:
             steps.append(f"stop {b} FAILED: {str(e)[:80]}")
-    steps.append(f"stopped {len(stopped)}/{len(old_bots)} old bots (capital freed)")
-    # 3) deploy the new bot with the top-N controllers
+    steps.append(f"stopped {len(stopped)}/{len(safe_bots)} pmm_mister-only bots")
+
+    # deploy the new bot
     try:
         res = await live.bot_orchestration.deploy_v2_controllers(
-            instance_name=instance, credentials_profile="master_account",
+            instance_name=instance, credentials_profile=profile,
             controllers_config=names,
             max_global_drawdown_quote=round(budget * 0.15),
             max_controller_drawdown_quote=round(budget / max(1, len(names)) * 0.6),
-            image="hummingbot/hummingbot:latest")
+            image=img)
         steps.append(f"deployed `{instance}` with {len(names)} controllers ({str(res)[:60]})")
     except Exception as e:
-        return {"ok": False, "steps": steps + [f"⚠️ DEPLOY FAILED after stopping old bots: {str(e)[:120]}",
-                "→ restore: redeploy the archived configs, or re-run reshape"],
-                "instance": instance, "aborted": "deploy failed"}
+        # ROLLBACK: redeploy the archived controllers of every stopped bot
+        steps.append(f"⚠️ DEPLOY FAILED: {str(e)[:120]} — rolling back")
+        rolled = 0
+        for b in stopped:
+            cfgs = archived.get(b) or []
+            try:
+                for cf in cfgs:
+                    cid = (cf.get("id") or cf.get("controller_id"))
+                    if cid:
+                        await live.controllers.create_or_update_controller_config(cid, _clean_live_config(cf))
+                rb_names = [(cf.get("id") or cf.get("controller_id")) for cf in cfgs if (cf.get("id") or cf.get("controller_id"))]
+                if rb_names:
+                    await live.bot_orchestration.deploy_v2_controllers(
+                        instance_name=f"{b}-rollback-{ts}", credentials_profile=profile,
+                        controllers_config=rb_names, image=img)
+                    rolled += 1
+            except Exception as re:
+                steps.append(f"rollback of `{b}` FAILED: {str(re)[:80]}")
+        steps.append(f"rolled back {rolled}/{len(stopped)} stopped bots")
+        return {"ok": False, "steps": steps, "instance": instance, "aborted": "deploy failed (rolled back)"}
+
     return {"ok": True, "steps": steps, "instance": instance,
-            "deployed": len(names), "stopped": len(stopped)}
+            "deployed": len(names), "stopped": len(stopped), "refused": refused}
 
 
 def _proposal_keyboard(proposals):
@@ -462,26 +576,34 @@ async def handle_callback(update, context, action, params):
                 await context.bot.send_message(chat_id=chat_id, text=tail, parse_mode="Markdown")
         return
 
-    # ---- Fleet RESHAPE: retire losers, promote the global top-N winners ----
+    # ---- Fleet RESHAPE: execute the EXACT snapshot the button carries (never recompute) ----
     if action == "reshape":
-        pool = _load(POOL_STORE)
-        fleet = _load(FLEET_STORE)
-        if not pool or not fleet:
-            await query.answer("No reshape plan available (pool/fleet missing).", show_alert=True)
+        pid = params[0] if params else None
+        snaps = _load(RESHAPE_STORE)
+        snap = snaps.get(pid) if isinstance(snaps, dict) else None
+        if not snap:
+            await query.answer("This reshape proposal has expired — wait for the next lap.", show_alert=True)
             return
-        selected = select_topN(pool, fleet)
-        plan = plan_reshape(selected, fleet)
-        if plan.get("reshape_status") == "applied":
-            await query.answer("Reshape already applied.", show_alert=True)
+        if snap.get("applied"):
+            await query.answer("Already applied.", show_alert=True)
             return
-        await query.answer(f"Reshaping fleet → top {len(selected)}… (stops old bots, redeploys)")
+        selected = snap.get("selected") or []
+        fleet = snap.get("fleet") or {}
+        cfg_snap = type("Cfg", (), snap.get("deploy_cfg") or {})()
+        await query.answer(f"Reshaping fleet → top {len(selected)}… (stops pmm_mister-only bots, redeploys)")
         live = await get_client(chat_id, context=context)
         ts = time.strftime("%Y%m%d%H%M%S")
-        res = await _execute_reshape(live, selected, fleet, ts)
-        _save(RESHAPE_STORE, {"applied": res.get("ok"), "instance": res.get("instance"),
-                              "selected": [c["cand_id"] for c in selected], "steps": res["steps"]})
-        head = ("🔄 *Reshape applied*" if res.get("ok") else "⚠️ *Reshape aborted*")
-        tail = "\n".join("• " + s for s in res["steps"])
+        res = await _execute_reshape(live, selected, fleet, ts, config=cfg_snap)
+        # persist result; on success mark applied and rewrite the live-fleet stores so a
+        # second press can't double-deploy and later laps start from the new fleet
+        snap["applied"] = bool(res.get("ok"))
+        snap["result"] = {"instance": res.get("instance"), "steps": res.get("steps")}
+        snaps[pid] = snap
+        _save(RESHAPE_STORE, snaps)
+        if res.get("ok"):
+            _save(POOL_STORE, [])  # stale pool must not be re-deployed
+        head = ("🔄 *Reshape applied*" if res.get("ok") else "⚠️ *Reshape not applied*")
+        tail = "\n".join("• " + s for s in res.get("steps", []))
         try:
             await query.edit_message_text(base_text + f"\n\n{head}\n{tail}", parse_mode="Markdown")
         except Exception:
@@ -541,9 +663,11 @@ def _read_token():
         return None
 
 
-def _reshape_keyboard():
+def _reshape_keyboard(proposal_id: str):
+    """Apply-reshape button carrying THIS lap's proposal id, so a press executes the exact
+    selection the user saw (not whatever the latest lap recomputed)."""
     return {"inline_keyboard": [[{"text": "🔄 Apply reshape",
-                                  "callback_data": "routines:pmm_autopilot:reshape:go"}]]}
+                                  "callback_data": f"routines:pmm_autopilot:reshape:{proposal_id}"}]]}
 
 
 def _tg_send_message(chat_id, text, reply_markup=None, token=None):
@@ -592,7 +716,8 @@ def _reshape_summary_text(selected, plan, fleet):
     fam = Counter(_family(c["origin"]) for c in selected)
     top = sorted(selected, key=lambda c: -c.get("est_volume", c["volume"]))[:5]
     cap = sum(c.get("autosized_capital", c["capital"]) for c in selected)
-    lines = [f"🔄 PMM Autopilot — reshape proposal ({fleet['N']} live controllers, {cap:,.0f} BRL)",
+    quote = fleet.get("quote") or ""
+    lines = [f"🔄 PMM Autopilot — reshape proposal ({fleet['N']} live controllers, {cap:,.0f} {quote})",
              f"keep {len(plan['keep'])} · deploy {len(plan['deploy'])} · retire {len(plan['retire'])}",
              f"families: {', '.join(f'{f}×{n}' for f, n in fam.most_common())}", "", "Top 5 by est. volume:"]
     for i, c in enumerate(top, 1):
@@ -706,18 +831,43 @@ async def _reshape_lap(config: Config, live, local, log) -> dict:
     """One reshape lap: sweep the whole live pmm fleet on local, pool every variant,
     snapshot the fleet, and select the global top-N. Writes POOL_STORE + FLEET_STORE."""
     live_perf, cfg_by, bot_names, health, cid_bot = await gather_active(live)
+    # FULL per-bot controller map (EVERY live controller + its type) — the invariant guard
+    # in _execute_reshape needs this to refuse stopping any bot hosting a non-pmm_mister.
+    bot_ctrls = {}
+    for cid, c in cfg_by.items():
+        if cid not in live_perf:
+            continue
+        cc = _clean_live_config(c)
+        b = cid_bot.get(cid)
+        if b:
+            bot_ctrls.setdefault(b, []).append(
+                {"cid": cid, "type": cc.get("controller_name") or "?",
+                 "pair": (cc.get("trading_pair") or "").upper()})
     ctrls = [(cid, c) for cid, c in cfg_by.items()
              if cid in live_perf and (_clean_live_config(c).get("controller_name") == "pmm_mister")]
     if config.only_pair:
         ctrls = [(cid, c) for cid, c in ctrls if (c.get("trading_pair", "").upper() == config.only_pair.upper())]
     if not ctrls:
         return {"selected": [], "plan": {}, "fleet": {}, "summary": "No live pmm_mister controllers to optimize."}
+    # QUOTE-CURRENCY GUARD: never pool/sum capital across different quote currencies.
+    def _quote(c):
+        return ((c.get("trading_pair") or "").upper().split("-") + ["", ""])[1]
+    quotes = {}
+    for cid, c in ctrls:
+        quotes.setdefault(_quote(c), 0.0)
+        quotes[_quote(c)] += live_perf.get(cid, {}).get("volume_traded", 0.0)
+    if len(quotes) > 1:
+        top_quote = max(quotes, key=quotes.get)
+        log(f"multiple quote currencies {sorted(quotes)} — restricting reshape to '{top_quote}' only")
+        ctrls = [(cid, c) for cid, c in ctrls if _quote(c) == top_quote]
+    quote = _quote(ctrls[0][1]) if ctrls else ""
     ctrls.sort(key=lambda kv: -live_perf.get(kv[0], {}).get("volume_traded", 0.0))
     fleet = {cid: {"bot": cid_bot.get(cid),
                    "capital": float(_clean_live_config(c).get("total_amount_quote") or 0),
                    "live_vol": live_perf.get(cid, {}).get("volume_traded", 0)} for cid, c in ctrls}
     total_cap = sum(f["capital"] for f in fleet.values())
-    fsnap = {"N": len(ctrls), "total_capital": total_cap, "controllers": fleet}
+    fsnap = {"N": len(ctrls), "total_capital": total_cap, "controllers": fleet,
+             "bot_ctrls": bot_ctrls, "quote": quote}
     _save(FLEET_STORE, fsnap)
     w1 = int(time.time()) - 300
     w0 = w1 - config.sweep_window_hours * 3600
@@ -751,8 +901,21 @@ async def _reshape_lap(config: Config, live, local, log) -> dict:
         return {"selected": [], "plan": {}, "fleet": fsnap, "summary": "Sweep produced no candidates."}
     selected = select_topN(pool, fsnap, budget=total_cap)
     plan = plan_reshape(selected, fsnap)
+    # snapshot this EXACT proposal so the button applies THIS selection, never a later recompute
+    import hashlib as _hl
+    ts = time.strftime("%Y%m%d%H%M%S")
+    proposal_id = _hl.sha1(("|".join(sorted(c["cand_id"] for c in selected)) + ts).encode()).hexdigest()[:12] if selected else ""
+    if selected:
+        snaps = _load(RESHAPE_STORE)
+        if not isinstance(snaps, dict):
+            snaps = {}
+        snaps[proposal_id] = {
+            "selected": selected, "fleet": fsnap, "plan": plan, "created": ts, "applied": False,
+            "deploy_cfg": {"deploy_image": config.deploy_image, "credentials_profile": config.credentials_profile},
+        }
+        _save(RESHAPE_STORE, snaps)
     return {"selected": selected, "plan": plan, "fleet": fsnap, "pool": pool,
-            "summary": _reshape_summary_text(selected, plan, fsnap)}
+            "proposal_id": proposal_id, "summary": _reshape_summary_text(selected, plan, fsnap)}
 
 
 async def run(config: Config, context: ContextTypes.DEFAULT_TYPE) -> RoutineResult:
@@ -782,7 +945,8 @@ async def run(config: Config, context: ContextTypes.DEFAULT_TYPE) -> RoutineResu
                 last = {"selected": [], "plan": {}, "fleet": {}, "summary": f"⚠️ lap {lap} error: {e}"}
             # send the proposal + Deploy button, then the current-generation HTML report
             try:
-                rm = _reshape_keyboard() if (last.get("selected") and not config.dry_run) else None
+                rm = (_reshape_keyboard(last.get("proposal_id"))
+                      if (last.get("selected") and last.get("proposal_id") and not config.dry_run) else None)
                 _tg_send_message(chat_id, last["summary"], reply_markup=rm, token=token)
                 if last.get("selected"):
                     html = await _build_gen_report(last.get("pool") or _load(POOL_STORE),
