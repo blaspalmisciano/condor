@@ -73,6 +73,8 @@ class Config(BaseModel):
     run_at_hours: str = Field(default="02:00,14:00", description="clock times (machine tz) to START each lap; laps finish ~3-4h later. Blank = use frequency_sec instead.")
     sweep_window_hours: int = Field(default=4, description="backtest window per reshape lap (4h ≈ 3-4h/lap)")
     max_laps: int = Field(default=0, description="stop after N laps (0 = run forever)")
+    lap_timeout_sec: int = Field(default=5400, description="hard per-lap watchdog (90m). A lap exceeding this is aborted+alerted, never allowed to hang the schedule.")
+    reshape_max_controllers: int = Field(default=6, description="max controllers SWEPT per lap (round-robin across laps covers the whole fleet); keeps a lap inside its window.")
     dry_run: bool = Field(default=False, description="if True, propose text only (no Deploy button)")
     deploy_image: str = Field(default="hummingbot/hummingbot:latest", description="container image for a reshape deploy (pin a @sha256 digest for reproducibility)")
     credentials_profile: str = Field(default="master_account", description="account/credentials profile the reshape deploys under")
@@ -90,6 +92,52 @@ def _save(path, obj):
     tmp = path + ".tmp"
     json.dump(obj, open(tmp, "w"), default=str)
     os.replace(tmp, path)
+
+
+RR_STORE = "data/pmm_autopilot_rr.json"
+HEARTBEAT_STORE = "data/pmm_autopilot_heartbeat.json"
+
+
+def _slug(label: str) -> str:
+    """Collapse any non-alphanumeric (dots, ×, spaces, hyphens) to '_', lowercase,
+    cap at 36 chars. Mirrors pmm_sweep.build_report so config ids are deploy-safe:
+    a DOTTED id (e.g. from ×1.25 or band 0.3-0.55) breaks deploy_v2_controllers
+    (the server appends .yml), which caused a live 500-after-stop."""
+    import re as _re
+    return _re.sub(r"[^a-z0-9]+", "_", (label or "base").lower()).strip("_")[:36] or "base"
+
+
+def _cand_id(cid: str, label: str, params) -> str:
+    """Deploy-safe candidate id. Base id stays (hyphens are legal); the variant suffix
+    is slugged. Total length capped (ids compound across generations) with a short hash
+    tail to preserve uniqueness. Result matches ^[a-z0-9_-]+$ (no dots/×/spaces)."""
+    if not params:
+        nid = cid
+    else:
+        nid = f"{cid}__{_slug(label)}"
+    if len(nid) > 80:
+        import hashlib as _hl
+        nid = nid[:72] + "_" + _hl.sha1(nid.encode()).hexdigest()[:7]
+    return nid
+
+
+def _id_ok(name: str) -> bool:
+    """A config id is deploy-safe iff it has no dot/×/space/etc. Letters (either case),
+    digits, hyphens and underscores are fine (the original live ids use them and deploy
+    cleanly). Only a DOT/×/space actually breaks deploy_v2_controllers."""
+    import re as _re
+    return bool(name) and bool(_re.fullmatch(r"[A-Za-z0-9_-]+", name)) and len(name) <= 80
+
+
+def _write_heartbeat(lap: int, n_controllers: int, n_proposals: int, status: str):
+    """Persist a completion heartbeat every lap so a stall SURFACES (a hung lap and a
+    quiet healthy lap must not look identical). status = ok|timeout|error|noop."""
+    try:
+        _save(HEARTBEAT_STORE, {"lap": lap, "finished_at": int(time.time()),
+                                "n_controllers": n_controllers, "n_proposals": n_proposals,
+                                "status": status})
+    except Exception:
+        pass
 
 
 def _next_target_seconds(hhmm_csv: str) -> int:
@@ -226,7 +274,7 @@ async def _one_lap(config: Config, live, local, snaps, log) -> dict:
         })
         if improved:
             full_cfg = apply_params(base_cfg, best["params"], axes)
-            full_cfg["id"] = f"{cid}__{label.lower().replace(' ', '_').replace('×', 'x')}"
+            full_cfg["id"] = _cand_id(cid, label, best["params"])
             pid = f"{cid[:8]}-{now % 100000}"
             proposals.append({
                 "proposal_id": pid, "controller_id": cid, "bot": cid_bot.get(cid),
@@ -434,6 +482,14 @@ async def _execute_reshape(live, selected: list, fleet: dict, ts: str, config=No
                 "instance": instance, "aborted": "invariant: nothing safe to reshape"}
     names = [c["cand_id"] for c in selected]
     budget = sum(float(c.get("autosized_capital") or c.get("capital") or 0.0) for c in selected)
+
+    # (1b) DEPLOY PRE-FLIGHT: a config id with a dot/×/space breaks deploy_v2_controllers
+    # (server appends .yml) → a 500 AFTER the old bots are stopped. Validate BEFORE stopping
+    # anything: refuse the whole reshape if any id is unsafe (stop nothing, deploy nothing).
+    bad_ids = [n for n in names if not _id_ok(n)]
+    if bad_ids:
+        steps.append(f"🛑 unsafe config id(s) — refusing reshape before touching live: {bad_ids[:3]}")
+        return {"ok": False, "steps": steps, "instance": instance, "aborted": "unsafe config id"}
 
     # (2) two-sided wallet fit — refuse if it can't fund both legs (or can't be checked)
     fit_ok, fit_msg = await _wallet_fit_gate(live, selected)
@@ -869,12 +925,31 @@ async def _reshape_lap(config: Config, live, local, log) -> dict:
     fsnap = {"N": len(ctrls), "total_capital": total_cap, "controllers": fleet,
              "bot_ctrls": bot_ctrls, "quote": quote}
     _save(FLEET_STORE, fsnap)
+    # ROUND-ROBIN cap: sweep at most reshape_max_controllers this lap and rotate the offset,
+    # so the whole fleet is covered over K laps while each lap stays inside its window. The
+    # uncapped 12-controller serial 1s sweep is exactly what hung the schedule.
+    live_origins = {cid for cid, _ in ctrls}
+    cap = max(1, int(config.reshape_max_controllers or len(ctrls)))
+    if len(ctrls) > cap:
+        rr = _load(RR_STORE)
+        off = (int(rr.get("offset", 0)) if isinstance(rr, dict) else 0) % len(ctrls)
+        to_sweep = (ctrls[off:] + ctrls[:off])[:cap]
+        _save(RR_STORE, {"offset": (off + cap) % len(ctrls)})
+        log(f"round-robin: sweeping {cap}/{len(ctrls)} controllers this lap (offset {off})")
+    else:
+        to_sweep = ctrls
+    swept_origins = {cid for cid, _ in to_sweep}
     w1 = int(time.time()) - 300
     w0 = w1 - config.sweep_window_hours * 3600
     scfg = SweepConfig(resolution=config.resolution, days=1)
     cfgobj = type("SweepCfg", (), {"window_hours": config.sweep_window_hours, "resolution": config.resolution})()
-    pool = []
-    for cid, base_cfg in ctrls:
+    # ACCUMULATE: carry forward last lap's variants for the still-live controllers NOT swept
+    # this lap, so the pool always covers the FULL fleet and select_topN is a true global
+    # top-N. Only the round-robin subset is refreshed each lap.
+    prev = _load(POOL_STORE)
+    pool = [c for c in (prev if isinstance(prev, list) else [])
+            if c.get("origin") in live_origins and c.get("origin") not in swept_origins]
+    for cid, base_cfg in to_sweep:
         bc = _clean_live_config(dict(base_cfg)); bc.setdefault("id", cid)
         cap = float(bc.get("total_amount_quote") or 0)
         try:
@@ -889,7 +964,7 @@ async def _reshape_lap(config: Config, live, local, log) -> dict:
             lbl = _tlabel(t, axes) or "BASE"
             params = t.get("params") or {}
             fc = apply_params(bc, params, axes)
-            nid = cid if not params else f"{cid}__{lbl.lower().replace(' ', '_').replace('×', 'x')}"
+            nid = _cand_id(cid, lbl, params)
             fc["id"] = nid
             pool.append({"origin": cid, "label": lbl, "params": params, "cand_id": nid,
                          "volume": round(t["volume"]), "biz": round(t["_biz"], 2),
@@ -939,11 +1014,25 @@ async def run(config: Config, context: ContextTypes.DEFAULT_TYPE) -> RoutineResu
             lap += 1
             lap_start = time.time()
             logs = []
+            status = "ok"
             try:
-                last = await _reshape_lap(config, live, local, lambda m: logs.append(str(m)))
+                # HARD per-lap watchdog: a lap that exceeds lap_timeout_sec is aborted and
+                # alerted, never allowed to hang the schedule (the failure that hid for days).
+                last = await asyncio.wait_for(
+                    _reshape_lap(config, live, local, lambda m: logs.append(str(m))),
+                    timeout=config.lap_timeout_sec)
+                if not last.get("selected"):
+                    status = "noop"
+            except asyncio.TimeoutError:
+                status = "timeout"
+                last = {"selected": [], "plan": {}, "fleet": {},
+                        "summary": f"⏱️ PMM Autopilot lap {lap} timed out after {config.lap_timeout_sec // 60}m "
+                                   f"— aborted, retrying next window."}
             except Exception as e:
-                last = {"selected": [], "plan": {}, "fleet": {}, "summary": f"⚠️ lap {lap} error: {e}"}
-            # send the proposal + Deploy button, then the current-generation HTML report
+                status = "error"
+                last = {"selected": [], "plan": {}, "fleet": {}, "summary": f"⚠️ PMM Autopilot lap {lap} error: {e}"}
+            # send the proposal + Deploy button (or the abort/no-op line), then the HTML.
+            # A message goes out EVERY lap now — a stall can no longer be silent.
             try:
                 rm = (_reshape_keyboard(last.get("proposal_id"))
                       if (last.get("selected") and last.get("proposal_id") and not config.dry_run) else None)
@@ -956,6 +1045,8 @@ async def run(config: Config, context: ContextTypes.DEFAULT_TYPE) -> RoutineResu
                                           caption="Current generation — ★ winners vs live", token=token)
             except Exception as e:
                 logs.append(f"send error: {e}")
+            _write_heartbeat(lap, len((last.get("fleet") or {}).get("controllers") or {}),
+                             len(last.get("selected") or []), status)
             if config.max_laps and lap >= config.max_laps:
                 break
             if not (config.run_at_hours or "").strip():
