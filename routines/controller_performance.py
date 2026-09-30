@@ -1219,10 +1219,19 @@ def build_summary(events, live, type_lookup, pair_lookup, rebate_rate, active_id
         unreal = float(lv.get("unrealized", 0.0))
         last_close = max((e["ts"] for e in evs), default=0)
 
+        # Detect redeploy: historical closed-executor volume exceeds the current
+        # bot instance counter, which resets to 0 on every redeploy. When true,
+        # the two data sources cover non-overlapping periods and are additive.
+        redeployed = is_active and bool(evs) and live_vol > 0 and live_vol < win_vol
+        disp_live_vol = (win_vol + live_vol) if redeployed else live_vol
+        # For PnL, combine historical (already includes rebates in win_reb) with
+        # current deployment's market PnL + rebates on current volume.
+        disp_live_pnl = ((win_pnl + win_reb) + (live_pnl + live_vol * rebate_rate)) if redeployed else live_pnl
+
         # Perf for the parameter heatmap: prefer the richer of window vs live so
         # active PMMs (0 closed runs) still score on their real throughput.
-        perf_vol = max(win_vol, live_vol)
-        perf_pnl = (live_pnl + live_vol * rebate_rate) if is_active else (win_pnl + win_reb)
+        perf_vol = max(win_vol, disp_live_vol)
+        perf_pnl = (disp_live_pnl) if is_active else (win_pnl + win_reb)
         perf_by_ctrl[cid] = {"_pnl_reb": perf_pnl, "_volume": perf_vol}
 
         # Capital allocated to this controller. Priority:
@@ -1269,6 +1278,24 @@ def build_summary(events, live, type_lookup, pair_lookup, rebate_rate, active_id
         else:
             yield_24h = None
 
+        # Fallback for freshly-redeployed active controllers with no recent
+        # executor events: derive 24h yield from VDA snapshot deltas instead.
+        if yield_24h is None and is_active and snap and cap_disp > 0:
+            _end = snap[-1]
+            _cutoff = _end[0] - 86400.0
+            _ref = snap[0]
+            for _s in snap:
+                if _s[0] <= _cutoff:
+                    _ref = _s
+                else:
+                    break
+            _t_span = _end[0] - _ref[0]
+            if _t_span > 0:
+                _v24 = max(float(_end[1]) - float(_ref[1]), 0.0)
+                _p24 = float(_end[2]) - float(_ref[2])
+                _scale = 86400.0 / _t_span if _t_span < 86400.0 else 1.0
+                yield_24h = ((_p24 + _v24 * rebate_rate) * _scale) / cap_disp * 100.0
+
         rows.append({
             "Controller": cid,
             "Type": ctype,
@@ -1281,8 +1308,8 @@ def build_summary(events, live, type_lookup, pair_lookup, rebate_rate, active_id
             "Fill %": (f"{fill_pct:.1f}%" if fill_pct is not None else "—"),
             "Window Vol": _fmt(win_vol),
             "Window PnL+Reb": _fmt(win_pnl + win_reb),
-            "Live Vol": _fmt(live_vol) if is_active else "—",
-            "Live PnL": _fmt(live_pnl) if is_active else "—",
+            "Live Vol": _fmt(disp_live_vol) if is_active else "—",
+            "Live PnL": _fmt(disp_live_pnl) if is_active else "—",
             "Unreal.": _fmt(unreal) if is_active else "—",
             "Win rate": (f"{wins / len(evs) * 100:.0f}%" if evs else "—"),
             "Last close": (datetime.fromtimestamp(last_close, tz=timezone.utc).strftime("%b %d %H:%M") if last_close else "—"),
@@ -1298,8 +1325,8 @@ def build_summary(events, live, type_lookup, pair_lookup, rebate_rate, active_id
             "_r_Fill %": fill_pct,
             "_r_Window Vol": float(win_vol),
             "_r_Window PnL+Reb": float(win_pnl + win_reb),
-            "_r_Live Vol": float(live_vol) if is_active else None,
-            "_r_Live PnL": float(live_pnl) if is_active else None,
+            "_r_Live Vol": float(disp_live_vol) if is_active else None,
+            "_r_Live PnL": float(disp_live_pnl) if is_active else None,
             "_r_Unreal.": float(unreal) if is_active else None,
         })
     rows.sort(key=lambda r: r["_sort"], reverse=True)
@@ -1727,7 +1754,7 @@ async def run(config: Config, context: ContextTypes.DEFAULT_TYPE) -> RoutineResu
             + '<tbody>' + "".join(_body_rows) + '</tbody></table></div>'
             + _tbl_js
         )
-        builder.markdown(_tbl_html)
+        builder._sections.append({"type": "plotly", "content": _tbl_html})
         for _r in summary_rows:
             for _k in list(_r.keys()):
                 if _k.startswith("_bg_") or _k.startswith("_raw_"):

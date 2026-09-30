@@ -19,7 +19,9 @@ The bots are pure market makers (Hummingbot's pmm_mister controller) operated us
 
 ## Markets
 
-Binance for now, on BRL pairs, mainly BTC-BRL and USDT-BRL. This kind of market making does best in sideways, ranging markets where price chops around a level, so you keep getting filled on both sides and collecting the rebate or a small PnL. It likes quiet to mildly volatile conditions with steady two sided flow.
+Gate spot, on the top USDT majors — mainly BTC-USDT and ETH-USDT. This kind of market making does best in sideways, ranging markets where price chops around a level, so you keep getting filled on both sides and collect the maker rebate plus a small PnL. It likes quiet to mildly volatile conditions with steady two-sided flow; the agent reads the regime each cycle and widens spreads / tightens inventory when volatility picks up.
+
+_(Originally developed on Binance BRL pairs — BTC-BRL / USDT-BRL; ported to Gate's USDT majors for the Agent Builders Cup, with params re-swept for the more efficient USDT order books.)_
 
 ---
 
