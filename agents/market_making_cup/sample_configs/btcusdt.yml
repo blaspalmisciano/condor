@@ -1,0 +1,23 @@
+# Base pmm_mister config for the Agent Builders Cup — Gate BTC-USDT.
+# Modelled on real high-volume BTC-USDT market-making runs: tight spreads, patient
+# effectivization, inventory band leaning slightly long. The botcamp_mm_agent routine
+# generates random variants AROUND this base and benches them; this is the seed/base.
+# NOTE: spreads/take_profit should be re-tuned to Gate's confirmed competition maker-fee tier.
+controller_name: pmm_mister
+controller_type: generic
+connector_name: gate_io
+trading_pair: BTC-USDT
+total_amount_quote: 400           # per controller; 2-controller fleet = $800
+buy_spreads: [0.0005]             # 0.5bp — valid at 0% maker; widen if Gate fee is nonzero
+sell_spreads: [0.0005]
+take_profit: 0.0001
+min_base_pct: 0.2
+target_base_pct: 0.5
+max_base_pct: 0.8
+executor_refresh_time: 300
+buy_cooldown_time: 10
+sell_cooldown_time: 10
+buy_position_effectivization_time: 900
+sell_position_effectivization_time: 900
+max_active_executors: 4
+portfolio_allocation: 0.05
