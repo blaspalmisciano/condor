@@ -194,6 +194,8 @@ async def read_fleet(live, cfg: Config) -> dict[str, dict]:
     except Exception:
         return out
     for cid, c in cfg_by.items():
+        if cid not in live_perf:
+            continue  # only ACTUALLY-RUNNING controllers (saved-but-idle configs are not "live")
         if c.get("controller_name") != "pmm_mister":
             continue
         if (c.get("trading_pair", "").upper() != cfg.trading_pair.upper()):
