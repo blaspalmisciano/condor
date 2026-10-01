@@ -99,22 +99,34 @@ def _save(path, obj):
 # base config + random variant generation (the "random changes" search)        #
 # --------------------------------------------------------------------------- #
 def base_config(cfg: Config) -> dict:
-    """A sane pmm_mister base for the pair — modelled on real BTC-USDT MM runs
-    (tight spreads, patient effectivization, lean-long inventory band)."""
+    """A COMPLETE, known-good pmm_mister config (verified to generate executors in the
+    backtest) — modelled on real high-volume MM runs: tight spreads, patient
+    effectivization, lean-long inventory band. The full field set matters: a minimal
+    config produces 0 executors (missing amounts_pct / order types / tolerances / global
+    SL-TP / skew etc.). random_variant() overrides only the tunable params on top of this."""
     return {
-        "controller_name": "pmm_mister",
-        "controller_type": "generic",
-        "connector_name": cfg.connector_name,
-        "trading_pair": cfg.trading_pair,
+        "controller_name": "pmm_mister", "controller_type": "generic",
+        "connector_name": cfg.connector_name, "trading_pair": cfg.trading_pair,
         "total_amount_quote": round(cfg.capital_quote / max(1, cfg.fleet_size), 2),
-        "buy_spreads": [0.0005], "sell_spreads": [0.0005],
-        "take_profit": 0.0001,
+        # tunable (random_variant overrides these)
+        "buy_spreads": [0.0005], "sell_spreads": [0.0005], "take_profit": 0.0001,
         "min_base_pct": 0.2, "target_base_pct": 0.5, "max_base_pct": 0.8,
         "executor_refresh_time": 300,
-        "buy_cooldown_time": 10, "sell_cooldown_time": 10,
         "buy_position_effectivization_time": 900, "sell_position_effectivization_time": 900,
-        "max_active_executors": 4,
-        "portfolio_allocation": 0.05,
+        # structural (required for the controller to actually quote)
+        "buy_amounts_pct": ["1"], "sell_amounts_pct": ["1"],
+        "buy_cooldown_time": 10, "sell_cooldown_time": 10,
+        "max_active_executors_by_level": 20,
+        "open_order_type": 3, "take_profit_order_type": 3,
+        "tick_mode": False, "price_distance_tolerance": "0.0003",
+        "refresh_tolerance": "0.0012", "tolerance_scaling": "1.2", "min_skew": "1",
+        "portfolio_allocation": "0.025", "leverage": 1, "position_mode": "ONEWAY",
+        "position_side": "BUY", "position_profit_protection": True,
+        "manual_kill_switch": False, "initial_positions": [],
+        # global safety (kept conservative; the organizers also impose hard limits)
+        "global_pnl_reference": "position",
+        "global_sl_enabled": True, "global_stop_loss": "0.01", "global_sl_activation_from": "target_base",
+        "global_tp_enabled": True, "global_take_profit": "0.005", "global_tp_activation_from": "min_base",
     }
 
 
