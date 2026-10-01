@@ -1,0 +1,312 @@
+[
+  {
+    "sig": "b2ecc5bf241837b4",
+    "config": {
+      "controller_name": "pmm_mister",
+      "controller_type": "generic",
+      "connector_name": "gate_io",
+      "trading_pair": "BTC-USDT",
+      "total_amount_quote": 400.0,
+      "buy_spreads": [
+        0.0012
+      ],
+      "sell_spreads": [
+        0.0012
+      ],
+      "take_profit": 5e-05,
+      "min_base_pct": 0.25,
+      "target_base_pct": 0.5,
+      "max_base_pct": 0.75,
+      "executor_refresh_time": 120,
+      "buy_position_effectivization_time": 900,
+      "sell_position_effectivization_time": 900,
+      "buy_amounts_pct": [
+        "1"
+      ],
+      "sell_amounts_pct": [
+        "1"
+      ],
+      "buy_cooldown_time": 10,
+      "sell_cooldown_time": 10,
+      "max_active_executors_by_level": 20,
+      "open_order_type": 3,
+      "take_profit_order_type": 3,
+      "tick_mode": false,
+      "price_distance_tolerance": "0.0003",
+      "refresh_tolerance": "0.0012",
+      "tolerance_scaling": "1.2",
+      "min_skew": "1",
+      "portfolio_allocation": "0.025",
+      "leverage": 1,
+      "position_mode": "ONEWAY",
+      "position_side": "BUY",
+      "position_profit_protection": true,
+      "manual_kill_switch": false,
+      "initial_positions": [],
+      "global_pnl_reference": "position",
+      "global_sl_enabled": true,
+      "global_stop_loss": "0.01",
+      "global_sl_activation_from": "target_base",
+      "global_tp_enabled": true,
+      "global_take_profit": "0.005",
+      "global_tp_activation_from": "min_base"
+    },
+    "per_window_pnl": [
+      0.0022,
+      -0.0849,
+      0.0024
+    ],
+    "median_pnl": 0.0022,
+    "n_positive": 2,
+    "n_windows": 3,
+    "updated": 1790814761
+  },
+  {
+    "sig": "82c16dadfa86f27d",
+    "config": {
+      "controller_name": "pmm_mister",
+      "controller_type": "generic",
+      "connector_name": "gate_io",
+      "trading_pair": "BTC-USDT",
+      "total_amount_quote": 400.0,
+      "buy_spreads": [
+        0.002
+      ],
+      "sell_spreads": [
+        0.002
+      ],
+      "take_profit": 0.0001,
+      "min_base_pct": 0.25,
+      "target_base_pct": 0.5,
+      "max_base_pct": 0.75,
+      "executor_refresh_time": 120,
+      "buy_position_effectivization_time": 600,
+      "sell_position_effectivization_time": 600,
+      "buy_amounts_pct": [
+        "1"
+      ],
+      "sell_amounts_pct": [
+        "1"
+      ],
+      "buy_cooldown_time": 10,
+      "sell_cooldown_time": 10,
+      "max_active_executors_by_level": 20,
+      "open_order_type": 3,
+      "take_profit_order_type": 3,
+      "tick_mode": false,
+      "price_distance_tolerance": "0.0003",
+      "refresh_tolerance": "0.0012",
+      "tolerance_scaling": "1.2",
+      "min_skew": "1",
+      "portfolio_allocation": "0.025",
+      "leverage": 1,
+      "position_mode": "ONEWAY",
+      "position_side": "BUY",
+      "position_profit_protection": true,
+      "manual_kill_switch": false,
+      "initial_positions": [],
+      "global_pnl_reference": "position",
+      "global_sl_enabled": true,
+      "global_stop_loss": "0.01",
+      "global_sl_activation_from": "target_base",
+      "global_tp_enabled": true,
+      "global_take_profit": "0.005",
+      "global_tp_activation_from": "min_base"
+    },
+    "per_window_pnl": [
+      0.0,
+      0.0,
+      0.0
+    ],
+    "median_pnl": 0.0,
+    "n_positive": 0,
+    "n_windows": 3,
+    "updated": 1790814644
+  },
+  {
+    "sig": "5c7097ad00befe82",
+    "config": {
+      "controller_name": "pmm_mister",
+      "controller_type": "generic",
+      "connector_name": "gate_io",
+      "trading_pair": "BTC-USDT",
+      "total_amount_quote": 400.0,
+      "buy_spreads": [
+        0.0008
+      ],
+      "sell_spreads": [
+        0.0008
+      ],
+      "take_profit": 0.0001,
+      "min_base_pct": 0.2,
+      "target_base_pct": 0.5,
+      "max_base_pct": 0.8,
+      "executor_refresh_time": 600,
+      "buy_position_effectivization_time": 2700,
+      "sell_position_effectivization_time": 2700,
+      "buy_amounts_pct": [
+        "1"
+      ],
+      "sell_amounts_pct": [
+        "1"
+      ],
+      "buy_cooldown_time": 10,
+      "sell_cooldown_time": 10,
+      "max_active_executors_by_level": 20,
+      "open_order_type": 3,
+      "take_profit_order_type": 3,
+      "tick_mode": false,
+      "price_distance_tolerance": "0.0003",
+      "refresh_tolerance": "0.0012",
+      "tolerance_scaling": "1.2",
+      "min_skew": "1",
+      "portfolio_allocation": "0.025",
+      "leverage": 1,
+      "position_mode": "ONEWAY",
+      "position_side": "BUY",
+      "position_profit_protection": true,
+      "manual_kill_switch": false,
+      "initial_positions": [],
+      "global_pnl_reference": "position",
+      "global_sl_enabled": true,
+      "global_stop_loss": "0.01",
+      "global_sl_activation_from": "target_base",
+      "global_tp_enabled": true,
+      "global_take_profit": "0.005",
+      "global_tp_activation_from": "min_base"
+    },
+    "per_window_pnl": [
+      -0.0026,
+      -0.262,
+      0.0059
+    ],
+    "median_pnl": -0.0026,
+    "n_positive": 1,
+    "n_windows": 3,
+    "updated": 1790814430
+  },
+  {
+    "sig": "7f3f1525e9caa3d4",
+    "config": {
+      "controller_name": "pmm_mister",
+      "controller_type": "generic",
+      "connector_name": "gate_io",
+      "trading_pair": "BTC-USDT",
+      "total_amount_quote": 400.0,
+      "buy_spreads": [
+        0.0003
+      ],
+      "sell_spreads": [
+        0.0003
+      ],
+      "take_profit": 5e-05,
+      "min_base_pct": 0.2,
+      "target_base_pct": 0.5,
+      "max_base_pct": 0.8,
+      "executor_refresh_time": 600,
+      "buy_position_effectivization_time": 1800,
+      "sell_position_effectivization_time": 1800,
+      "buy_amounts_pct": [
+        "1"
+      ],
+      "sell_amounts_pct": [
+        "1"
+      ],
+      "buy_cooldown_time": 10,
+      "sell_cooldown_time": 10,
+      "max_active_executors_by_level": 20,
+      "open_order_type": 3,
+      "take_profit_order_type": 3,
+      "tick_mode": false,
+      "price_distance_tolerance": "0.0003",
+      "refresh_tolerance": "0.0012",
+      "tolerance_scaling": "1.2",
+      "min_skew": "1",
+      "portfolio_allocation": "0.025",
+      "leverage": 1,
+      "position_mode": "ONEWAY",
+      "position_side": "BUY",
+      "position_profit_protection": true,
+      "manual_kill_switch": false,
+      "initial_positions": [],
+      "global_pnl_reference": "position",
+      "global_sl_enabled": true,
+      "global_stop_loss": "0.01",
+      "global_sl_activation_from": "target_base",
+      "global_tp_enabled": true,
+      "global_take_profit": "0.005",
+      "global_tp_activation_from": "min_base"
+    },
+    "per_window_pnl": [
+      -0.0081,
+      -0.4306,
+      0.0149
+    ],
+    "median_pnl": -0.0081,
+    "n_positive": 1,
+    "n_windows": 3,
+    "updated": 1790814546
+  },
+  {
+    "sig": "6f2843e1b84abfb7",
+    "config": {
+      "controller_name": "pmm_mister",
+      "controller_type": "generic",
+      "connector_name": "gate_io",
+      "trading_pair": "BTC-USDT",
+      "total_amount_quote": 400.0,
+      "buy_spreads": [
+        0.0003
+      ],
+      "sell_spreads": [
+        0.0003
+      ],
+      "take_profit": 5e-05,
+      "min_base_pct": 0.2,
+      "target_base_pct": 0.5,
+      "max_base_pct": 0.8,
+      "executor_refresh_time": 600,
+      "buy_position_effectivization_time": 900,
+      "sell_position_effectivization_time": 900,
+      "buy_amounts_pct": [
+        "1"
+      ],
+      "sell_amounts_pct": [
+        "1"
+      ],
+      "buy_cooldown_time": 10,
+      "sell_cooldown_time": 10,
+      "max_active_executors_by_level": 20,
+      "open_order_type": 3,
+      "take_profit_order_type": 3,
+      "tick_mode": false,
+      "price_distance_tolerance": "0.0003",
+      "refresh_tolerance": "0.0012",
+      "tolerance_scaling": "1.2",
+      "min_skew": "1",
+      "portfolio_allocation": "0.025",
+      "leverage": 1,
+      "position_mode": "ONEWAY",
+      "position_side": "BUY",
+      "position_profit_protection": true,
+      "manual_kill_switch": false,
+      "initial_positions": [],
+      "global_pnl_reference": "position",
+      "global_sl_enabled": true,
+      "global_stop_loss": "0.01",
+      "global_sl_activation_from": "target_base",
+      "global_tp_enabled": true,
+      "global_take_profit": "0.005",
+      "global_tp_activation_from": "min_base"
+    },
+    "per_window_pnl": [
+      -0.0422,
+      -0.4684,
+      0.0231
+    ],
+    "median_pnl": -0.0422,
+    "n_positive": 1,
+    "n_windows": 3,
+    "updated": 1790814885
+  }
+]

@@ -41,7 +41,7 @@ from routines.botcamp_bench import (
 CONTINUOUS = True
 
 BENCH_STORE = "data/botcamp_bench.json"
-SEED_BENCH = "data/botcamp_bench_seed.json"   # shipped fallback (egress hedge)
+SEED_BENCH = "agents/market_making_cup/sample_configs/bench_seed.json"  # shipped fallback (egress hedge)
 STATE_STORE = "data/botcamp_mm_state.json"
 
 

@@ -50,10 +50,24 @@ def test_eligibility_gate_and_substitute_excludes_failed():
     elig = bench_eligible(b, min_positive=5)
     assert all(e["n_positive"] >= 5 for e in elig)
     top = b[0]["sig"]
-    sub = select_substitute(b, min_positive=5, exclude_sigs={top})
-    assert sub is None or sub["sig"] != top  # never re-deploy the config that just died
-    # with only one eligible and it excluded -> nothing to sub in
-    assert select_substitute(b, min_positive=5, exclude_sigs={top}) is None
+    # never re-deploy the config that just died (exclusion holds in both modes)
+    assert select_substitute(b, min_positive=5, exclude_sigs={top}, allow_fallback=False) is None
+    sub = select_substitute(b, min_positive=5, exclude_sigs={top}, allow_fallback=True)
+    assert sub is None or sub["sig"] != top
+
+
+def test_select_substitute_fallback_never_starves():
+    # all configs below the strict gate (near-zero backtest PnL), but majority-positive exists
+    c_a = {"take_profit": 0.0001}
+    c_b = {"take_profit": 0.0002}
+    b = []
+    b = bench_upsert(b, make_bench_entry(c_a, [0.02, 0.01, -0.01], ts=1))  # 2/3 positive, median 0.01
+    b = bench_upsert(b, make_bench_entry(c_b, [-0.01, -0.02, 0.0], ts=1))  # 0/3 positive
+    # strict gate (>=3) finds nothing...
+    assert select_substitute(b, min_positive=3, allow_fallback=False) is None
+    # ...but fallback returns the majority-positive best-median one (never starves)
+    pick = select_substitute(b, min_positive=3, allow_fallback=True)
+    assert pick is not None and pick["sig"] == make_bench_entry(c_a, [0.02, 0.01, -0.01])["sig"]
 
 
 def test_substitution_triggers():

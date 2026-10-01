@@ -120,11 +120,24 @@ def bench_eligible(bench: list[dict], min_positive: int,
 
 
 def select_substitute(bench: list[dict], min_positive: int,
-                      exclude_sigs: Optional[set[str]] = None) -> Optional[dict]:
-    """Top eligible bench config to deploy in place of a failed controller, or None
-    if the bench has nothing that clears the gate."""
-    elig = bench_eligible(bench, min_positive, exclude_sigs)
-    return elig[0] if elig else None
+                      exclude_sigs: Optional[set[str]] = None,
+                      allow_fallback: bool = True) -> Optional[dict]:
+    """Pick the config to deploy in place of a failed controller.
+
+    Prefer a STRICT-eligible config (positive in >= min_positive windows). If none clears
+    that gate (common when tight-MM backtest PnL hovers near zero), fall back so the fleet
+    is never config-starved: best median among MAJORITY-positive configs, else the single
+    best median overall. `allow_fallback=False` keeps the strict behaviour.
+    Bench is maintained sorted by median PnL desc, so [0] is always the best."""
+    exclude = exclude_sigs or set()
+    pool = [e for e in bench if e["sig"] not in exclude]
+    strict = [e for e in pool if e["n_positive"] >= min_positive]
+    if strict:
+        return strict[0]
+    if not allow_fallback or not pool:
+        return None
+    majority = [e for e in pool if e["n_positive"] >= (e.get("n_windows", 0) + 1) // 2]
+    return majority[0] if majority else pool[0]
 
 
 # --------------------------------------------------------------------------- #
