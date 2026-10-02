@@ -126,7 +126,7 @@ def base_config(cfg: Config) -> dict:
         "open_order_type": 3, "take_profit_order_type": 3,
         "tick_mode": False, "price_distance_tolerance": "0.0003",
         "refresh_tolerance": "0.0012", "tolerance_scaling": "1.2", "min_skew": "1",
-        "portfolio_allocation": "0.025", "leverage": 1, "position_mode": "ONEWAY",
+        "portfolio_allocation": "0.3", "leverage": 1, "position_mode": "ONEWAY",  # 0.025 made $2.50 orders (< Binance min notional) → no quoting; 0.3 → ~$30 orders
         "position_side": "BUY", "position_profit_protection": True,
         "manual_kill_switch": False, "initial_positions": [],
         # global safety (kept conservative; the organizers also impose hard limits)
@@ -136,8 +136,9 @@ def base_config(cfg: Config) -> dict:
     }
 
 
-# spreads must clear the Gate VIP10 maker fee (4bp) to profit on spread capture -> all >= 6bp
-_SPREADS = [0.0006, 0.001, 0.0015, 0.0025, 0.004]
+# spreads must clear the 4bp Gate maker fee but stay tight enough to actually fill -> 6-20bp
+# (40bp was too wide to ever fill on BTC-USDT in the overnight test)
+_SPREADS = [0.0006, 0.0008, 0.001, 0.0015, 0.002]
 _TPS = [0.0003, 0.0005, 0.0008, 0.0012]
 _EFF = [600, 900, 1800, 2700]
 _REFRESH = [120, 300, 600]
@@ -293,50 +294,46 @@ async def _invariant_ok(live, cfg: Config, cid: str, bot: Optional[str], fleet: 
 _FLAT_EPS = 1e-6
 
 
-async def _position_amount(live, cid: str, log) -> Optional[float]:
-    """Best-effort read of a controller's held base-position size. None = couldn't read."""
-    for call in ("get_position_held", "get_positions_summary"):
-        fn = getattr(live.executors, call, None)
-        if not fn:
-            continue
-        try:
-            r = await fn(cid) if call == "get_position_held" else await fn()
-        except TypeError:
-            try:
-                r = await fn()
-            except Exception:
-                continue
-        except Exception:
-            continue
-        # pull a base amount out of whatever shape came back
-        try:
-            if isinstance(r, dict):
-                for k in ("amount", "base_amount", "position", "net_amount", "held"):
-                    if k in r:
-                        return float(r[k])
-            if isinstance(r, list):
-                tot = 0.0
-                for e in r:
-                    if isinstance(e, dict) and (e.get("controller_id") == cid or e.get("id") == cid):
-                        tot += float(e.get("amount") or e.get("base_amount") or e.get("position") or 0)
-                return tot
-        except Exception:
-            return None
-    return None
+async def _position_amount(live, bot: Optional[str], cid: str, log) -> Optional[float]:
+    """Read a controller's held base-position size from the bot performance. Returns 0.0 when
+    the controller has never traded (volume_traded == 0 → definitely flat), a signed amount
+    when it can be read, or None when it genuinely can't be determined (→ caller fail-closes)."""
+    if not bot:
+        return None
+    try:
+        st = await live.bot_orchestration.get_active_bots_status()
+        perf = ((st.get("data") or {}).get(bot) or {}).get("performance", {}).get(cid, {})
+    except Exception:
+        return None
+    if not perf:
+        return None
+    p = perf.get("performance", perf)  # some payloads nest a second 'performance'
+    if float(p.get("volume_traded", 0) or 0) == 0:
+        return 0.0  # never traded → flat for certain
+    pos = p.get("positions") or p.get("position") or p.get("net_position")
+    try:
+        if isinstance(pos, (int, float)):
+            return float(pos)
+        if isinstance(pos, dict):
+            return float(pos.get("net_amount") or pos.get("amount") or pos.get("base") or 0)
+        if isinstance(pos, list):
+            return float(sum(float(e.get("amount") or e.get("net_amount") or 0) for e in pos if isinstance(e, dict)))
+    except Exception:
+        pass
+    return None  # traded but position unreadable → fail-closed
 
 
 async def close_position(live, cfg: Config, cid: str, bot: Optional[str], log) -> bool:
-    """Flatten a controller's position and CONFIRM it is flat. The flatten mechanic is not yet
-    validated live, so this is FAIL-CLOSED: it returns True only when it can verify ~0 held.
-    If the position is already flat -> True. If it holds inventory and we can't prove a clean
-    flatten -> False (and the caller refuses to swap, so we NEVER orphan an open position)."""
-    amt = await _position_amount(live, cid, log)
+    """Confirm a controller's position is flat before a swap. FAIL-CLOSED: returns True only when
+    it can verify ~0 held (never-traded or readable-flat). If it holds inventory, or can't be
+    read, returns False and the caller refuses the swap — so we NEVER orphan an open position."""
+    amt = await _position_amount(live, bot, cid, log)
     if amt is None:
         log(f"close {cid}: cannot read position → fail-closed (no swap)")
         return False
     if abs(amt) <= _FLAT_EPS:
-        return True  # already flat — safe to swap
-    log(f"close {cid}: holds {amt:.8f} base; flatten mechanic not yet validated → fail-closed (no swap)")
+        return True  # flat — safe to swap
+    log(f"close {cid}: holds {amt:.8f} base; flatten not yet validated → fail-closed (no swap)")
     return False
 
 
