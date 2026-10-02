@@ -1,0 +1,84 @@
+#!/usr/bin/env python
+"""External watchdog for botcamp_mm_agent — runs every 5 min via launchd, INDEPENDENT of any
+Claude session. Enforces the only two valid states: the agent is RUNNING, or we're FIXING it.
+
+Each run it checks (a) an instance is registered running on localhost:8088, and (b) the agent's
+heartbeat (data/botcamp_mm_heartbeat.json) is fresh. If either fails -> Telegram alert + restart
+the instance. A dead/wedged agent therefore self-heals within a few minutes, and you get pinged.
+"""
+import os, re, sys, json, time, urllib.request
+
+ROOT = "/Users/blaspalmisciano/condor"
+sys.path.insert(0, ROOT)
+os.chdir(ROOT)
+
+HEARTBEAT = "data/botcamp_mm_heartbeat.json"
+STALE_SEC = 2400  # 40 min — a cycle (incl. slow bench build) can run several minutes; only a
+                  # truly dead/wedged agent exceeds this. Clean stops are caught by the status check.
+CFG = {"trading_pair": "BTC-USDT", "connector_name": "binance", "fleet_size": 2,
+       "capital_quote": 200, "cold_start": True, "dry_run": False, "variants_per_cycle": 2,
+       "n_windows": 3, "window_hours": 12, "cycle_sleep_sec": 300, "max_subs_per_hour": 2,
+       "use_unrealized_trigger": False}
+CHAT = 6310433268
+
+
+def _jwt():
+    admin = [int(m.group(1)) for line in open(".env")
+             if (m := re.match(r'\s*ADMIN_USER_ID\s*=\s*"?([0-9]+)', line))][0]
+    from condor.web.auth import create_jwt
+    return create_jwt(admin, role="admin")
+
+
+def _api(method, path, tok, body=None):
+    req = urllib.request.Request(
+        f"http://localhost:8088/api/v1/routines{path}",
+        data=json.dumps(body).encode() if body else None,
+        headers={"Authorization": f"Bearer {tok}", "Content-Type": "application/json"}, method=method)
+    return json.load(urllib.request.urlopen(req, timeout=30))
+
+
+def _tg(msg):
+    try:
+        from routines.pmm_autopilot import _tg_send_message
+        _tg_send_message(CHAT, msg)
+    except Exception:
+        pass
+
+
+def main():
+    stamp = time.strftime("%Y-%m-%d %H:%M:%S")
+    try:
+        tok = _jwt()
+        insts = [i for i in _api("GET", "/instances", tok) if i.get("routine_name") == "botcamp_mm_agent"]
+        running = [i for i in insts if i.get("status") == "running"]
+        hb_age = None
+        if os.path.exists(HEARTBEAT):
+            hb_age = time.time() - json.load(open(HEARTBEAT)).get("ts", 0)
+        healthy = bool(running) and hb_age is not None and hb_age < STALE_SEC
+        if healthy:
+            print(f"{stamp} OK — running, heartbeat {hb_age:.0f}s old")
+            return
+        why = []
+        if not running:
+            why.append("no running instance")
+        if hb_age is None:
+            why.append("no heartbeat")
+        elif hb_age >= STALE_SEC:
+            why.append(f"heartbeat stale {hb_age:.0f}s")
+        reason = ", ".join(why)
+        for i in running:  # clear any wedged instance before restarting
+            try:
+                _api("POST", f"/instances/{i['instance_id']}/stop", tok)
+            except Exception:
+                pass
+        r = _api("POST", "/start", tok, {"routine_name": "botcamp_mm_agent",
+                                         "server_name": "brigado", "config": CFG})
+        print(f"{stamp} RESTARTED ({reason}) -> {r.get('instance_id')}")
+        _tg(f"🔧 botcamp watchdog: agent unhealthy ({reason}) → restarted {r.get('instance_id')}")
+    except Exception as e:
+        print(f"{stamp} watchdog ERROR: {e}")
+        _tg(f"⚠️ botcamp watchdog error: {str(e)[:120]}")
+
+
+if __name__ == "__main__":
+    main()
