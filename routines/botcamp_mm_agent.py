@@ -43,6 +43,7 @@ CONTINUOUS = True
 BENCH_STORE = "data/botcamp_bench.json"
 SEED_BENCH = "agents/market_making_cup/sample_configs/bench_seed.json"  # shipped fallback (egress hedge)
 STATE_STORE = "data/botcamp_mm_state.json"
+HEARTBEAT = "data/botcamp_mm_heartbeat.json"  # written every cycle — the "is it alive" signal
 
 
 class Config(BaseModel):
@@ -413,51 +414,62 @@ async def cold_start_deploy(live, cfg: Config, bench: list[dict], need: int, log
 # --------------------------------------------------------------------------- #
 # the continuous loop                                                           #
 # --------------------------------------------------------------------------- #
+def _write_heartbeat(cfg: Config, state: dict, status: str, bench_n: int, log):
+    """The 'is it alive' signal — written EVERY cycle. The external watchdog reads this; a
+    stale heartbeat means the agent is wedged (running-but-dead) and must be restarted."""
+    try:
+        _save(HEARTBEAT, {"ts": int(time.time()), "status": status, "pair": cfg.trading_pair,
+                          "fleet_size": cfg.fleet_size, "bench": bench_n, "dry_run": cfg.dry_run,
+                          "cold_start_bot": state.get("cold_start_bot")})
+    except Exception as e:
+        log(f"heartbeat write err: {str(e)[:50]}")
+
+
 async def run_cycle(live, local, cfg: Config, bench: list[dict], state: dict, log) -> list[dict]:
     now = time.time()
-    # 1) grow the bench
-    bench = await grow_bench(local, cfg, bench, log)
-    _save(BENCH_STORE, bench)
-
-    # 2) manage the fleet
-    fleet = await read_fleet(live, cfg)
-    log(f"fleet: {len(fleet)} live / target {cfg.fleet_size}")
-    # 2a) COLD START — the agent deploys its OWN fleet if under target (mimics the competition:
-    # start the instance from nothing and it spins up its fleet). Grace window prevents re-deploy
-    # while the new controllers are still coming online.
-    if cfg.cold_start and len(fleet) < cfg.fleet_size:
-        if now - float(state.get("cold_start_ts", 0)) > 600:
+    status = "ok"
+    try:
+        # 1) FLEET FIRST — deploy promptly on cold start (don't make the fleet wait on backtests)
+        fleet = await read_fleet(live, cfg)
+        log(f"fleet: {len(fleet)} live / target {cfg.fleet_size}")
+        if cfg.cold_start and len(fleet) < cfg.fleet_size and now - float(state.get("cold_start_ts", 0)) > 600:
             need = cfg.fleet_size - len(fleet)
             log(f"cold-start: {len(fleet)}/{cfg.fleet_size} live → deploying {need}")
             inst = await cold_start_deploy(live, cfg, bench, need, log)
             if inst:
                 state["cold_start_ts"] = now
                 state["cold_start_bot"] = inst
-                _save(STATE_STORE, state)
-            return bench  # let the new fleet come online before managing it
-    recently_failed = set(state.get("recently_failed", []))
-    # churn cap: count substitutions in the last rolling hour
-    sub_times = [t for t in state.get("sub_times", []) if now - t < 3600]
-    to_sub = check_triggers(fleet, state, cfg, now)
-    for cid, reason in to_sub:
-        if len(sub_times) >= cfg.max_subs_per_hour:
-            log(f"⏸️ churn cap: {len(sub_times)}/{cfg.max_subs_per_hour} subs this hour — deferring {cid}")
-            continue
-        pick = select_substitute(bench, cfg.min_positive_windows, exclude_sigs=recently_failed)
-        if not pick:
-            log(f"{cid} needs sub ({reason}) but bench has no eligible config yet")
-            continue
-        log(f"SUBSTITUTE {cid}: {reason}")
-        if await apply_substitution(live, cfg, cid, fleet[cid].get("bot"), pick["config"], fleet, log):
-            sub_times.append(now)
-            dead_sig = state.get("live_sig", {}).get(cid)
-            if dead_sig:
-                recently_failed.add(dead_sig)  # don't redeploy the config that just failed
-            state.setdefault("live_sig", {})[cid] = pick["sig"]
-            state["vol_hist"].pop(cid, None)  # reset the no-trade clock for the new config
-    state["sub_times"] = sub_times
-    state["recently_failed"] = list(recently_failed)[-20:]  # bounded memory
-    _save(STATE_STORE, state)
+            status = "cold_start"
+        else:
+            # manage the existing fleet: triggers + fail-closed substitutions
+            recently_failed = set(state.get("recently_failed", []))
+            sub_times = [t for t in state.get("sub_times", []) if now - t < 3600]
+            for cid, reason in check_triggers(fleet, state, cfg, now):
+                if len(sub_times) >= cfg.max_subs_per_hour:
+                    log(f"⏸️ churn cap: {len(sub_times)}/{cfg.max_subs_per_hour} this hour — deferring {cid}")
+                    continue
+                pick = select_substitute(bench, cfg.min_positive_windows, exclude_sigs=recently_failed)
+                if not pick:
+                    log(f"{cid} needs sub ({reason}) but bench has no eligible config yet")
+                    continue
+                log(f"SUBSTITUTE {cid}: {reason}")
+                if await apply_substitution(live, cfg, cid, fleet[cid].get("bot"), pick["config"], fleet, log):
+                    sub_times.append(now)
+                    dead_sig = state.get("live_sig", {}).get(cid)
+                    if dead_sig:
+                        recently_failed.add(dead_sig)
+                    state.setdefault("live_sig", {})[cid] = pick["sig"]
+                    state["vol_hist"].pop(cid, None)
+            state["sub_times"] = sub_times
+            state["recently_failed"] = list(recently_failed)[-20:]
+        _save(STATE_STORE, state)
+        # 2) grow the bench (slower; after the fleet is handled)
+        bench = await grow_bench(local, cfg, bench, log)
+        _save(BENCH_STORE, bench)
+    except Exception as e:
+        status = f"error: {str(e)[:100]}"
+        log(status)
+    _write_heartbeat(cfg, state, status, len(bench), log)  # 3) ALWAYS leave a fresh signal
     return bench
 
 
