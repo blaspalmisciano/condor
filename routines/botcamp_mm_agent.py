@@ -72,6 +72,11 @@ class Config(BaseModel):
     deploy_image: str = Field(default="hummingbot/hummingbot:latest")
     bot_name: str = Field(default="botcamp-mm", description="Bot instance that hosts the fleet")
     dry_run: bool = Field(default=True, description="Decision logic only; no live deploys/updates")
+    # Stage-1 live safeguards
+    max_subs_per_hour: int = Field(default=3, description="Churn cap — max substitutions per rolling hour (runaway guard)")
+    tg_chat_id: int = Field(default=6310433268, description="Telegram chat for action alerts (0 = off)")
+    use_unrealized_trigger: bool = Field(default=False, description="Instantaneous unrealized-PnL trigger — OFF by default (sells the bottom on a mean-reverting MM; no-trade trigger is the real signal)")
+    cold_start: bool = Field(default=True, description="If fewer than fleet_size controllers are live, deploy fresh ones (random variants / top bench)")
 
 
 # --------------------------------------------------------------------------- #
@@ -229,11 +234,13 @@ def check_triggers(fleet: dict[str, dict], state: dict, cfg: Config, now: float)
     vol_hist = state.setdefault("vol_hist", {})
     to_sub: list[tuple[str, str]] = []
     for cid, m in fleet.items():
-        # unrealized rule
-        if m["unrealized"] <= cfg.sub_upnl:
+        # unrealized rule — OFF by default: an instantaneous unrealized threshold sells the
+        # bottom on a mean-reverting MM (confirmed live: brigado swung -2200 -> -222 in hours).
+        # A genuinely-stuck losing pmm_mister stops trading, so the no-trade rule catches it.
+        if cfg.use_unrealized_trigger and m["unrealized"] <= cfg.sub_upnl:
             to_sub.append((cid, f"unrealized {m['unrealized']:.2f} <= {cfg.sub_upnl}"))
             continue
-        # no-new-volume rule
+        # no-new-volume rule (the real substitution signal)
         prev = vol_hist.get(cid)
         if prev is None or m["volume"] > prev["volume"] + 1e-9:
             vol_hist[cid] = {"volume": m["volume"], "since": now}  # volume advanced -> reset clock
@@ -248,26 +255,159 @@ def check_triggers(fleet: dict[str, dict], state: dict, cfg: Config, now: float)
     return to_sub
 
 
-async def apply_substitution(live, cfg: Config, cid: str, new_cfg: dict, log) -> bool:
-    """Live-update a controller's config to the bench winner's params (in-place swap,
-    no whole-bot redeploy). Returns True on success."""
+def _tg(cfg: Config, text: str):
+    """Fire-and-forget Telegram alert (reuses the autopilot's raw sender)."""
+    if not cfg.tg_chat_id:
+        return
+    try:
+        from routines.pmm_autopilot import _tg_send_message
+        _tg_send_message(cfg.tg_chat_id, text)
+    except Exception:
+        pass
+
+
+async def _invariant_ok(live, cfg: Config, cid: str, bot: Optional[str], fleet: dict, new_cfg: dict, log) -> bool:
+    """FAIL-CLOSED invariant guard — the single most important safety check. A write is
+    allowed ONLY if: (a) cid is in the pmm_mister/pair fleet we just read, (b) the config we
+    are about to deploy is itself pmm_mister on our pair, and (c) a fresh server read confirms
+    the target controller is pmm_mister. Any doubt -> refuse. This is what protects every
+    co-hosted rebate_mill / pmm_king / chessboard controller from ever being touched."""
+    if cid not in fleet:
+        log(f"🛡️ REFUSE {cid}: not in the pmm_mister/{cfg.trading_pair} fleet"); return False
+    if new_cfg.get("controller_name") != "pmm_mister" or \
+       (new_cfg.get("trading_pair", "").upper() != cfg.trading_pair.upper()):
+        log(f"🛡️ REFUSE {cid}: replacement config is not pmm_mister/{cfg.trading_pair}"); return False
+    try:  # belt-and-suspenders: re-read the live target's type right before writing
+        existing = await live.controllers.get_bot_controller_configs(bot) if bot else None
+        if existing:
+            match = next((c for c in existing if (c.get("id") or c.get("controller_id")) == cid), None)
+            if match and match.get("controller_name") != "pmm_mister":
+                log(f"🛡️ REFUSE {cid}: live target is {match.get('controller_name')}, not pmm_mister"); return False
+    except Exception as e:
+        log(f"🛡️ REFUSE {cid}: cannot verify live type ({str(e)[:50]}) — fail-closed"); return False
+    return True
+
+
+_FLAT_EPS = 1e-6
+
+
+async def _position_amount(live, cid: str, log) -> Optional[float]:
+    """Best-effort read of a controller's held base-position size. None = couldn't read."""
+    for call in ("get_position_held", "get_positions_summary"):
+        fn = getattr(live.executors, call, None)
+        if not fn:
+            continue
+        try:
+            r = await fn(cid) if call == "get_position_held" else await fn()
+        except TypeError:
+            try:
+                r = await fn()
+            except Exception:
+                continue
+        except Exception:
+            continue
+        # pull a base amount out of whatever shape came back
+        try:
+            if isinstance(r, dict):
+                for k in ("amount", "base_amount", "position", "net_amount", "held"):
+                    if k in r:
+                        return float(r[k])
+            if isinstance(r, list):
+                tot = 0.0
+                for e in r:
+                    if isinstance(e, dict) and (e.get("controller_id") == cid or e.get("id") == cid):
+                        tot += float(e.get("amount") or e.get("base_amount") or e.get("position") or 0)
+                return tot
+        except Exception:
+            return None
+    return None
+
+
+async def close_position(live, cfg: Config, cid: str, bot: Optional[str], log) -> bool:
+    """Flatten a controller's position and CONFIRM it is flat. The flatten mechanic is not yet
+    validated live, so this is FAIL-CLOSED: it returns True only when it can verify ~0 held.
+    If the position is already flat -> True. If it holds inventory and we can't prove a clean
+    flatten -> False (and the caller refuses to swap, so we NEVER orphan an open position)."""
+    amt = await _position_amount(live, cid, log)
+    if amt is None:
+        log(f"close {cid}: cannot read position → fail-closed (no swap)")
+        return False
+    if abs(amt) <= _FLAT_EPS:
+        return True  # already flat — safe to swap
+    log(f"close {cid}: holds {amt:.8f} base; flatten mechanic not yet validated → fail-closed (no swap)")
+    return False
+
+
+async def apply_substitution(live, cfg: Config, cid: str, bot: Optional[str], new_cfg: dict,
+                             fleet: dict, log) -> bool:
+    """Replace a controller's config with a bench winner — only AFTER its position is confirmed
+    flat (fail-closed), and only on a verified pmm_mister/pair target (the invariant)."""
+    if not await _invariant_ok(live, cfg, cid, bot, fleet, new_cfg, log):
+        return False
     if cfg.dry_run:
-        log(f"[dry_run] would substitute {cid} -> {param_sig(new_cfg)}")
+        log(f"[dry_run] would substitute {cid} on bot {bot} -> {param_sig(new_cfg)} (after flatten)")
         return True
+    if not await close_position(live, cfg, cid, bot, log):
+        _tg(cfg, f"🛑 botcamp agent: refused to substitute {cid} — position not confirmed flat")
+        return False
     try:
         payload = dict(new_cfg)
         payload["id"] = cid  # keep the slot id, swap the params
         await live.controllers.create_or_update_controller_config(cid, payload)
-        # live-apply to the running bot slot
         try:
-            await live.controllers.update_bot_controller_config(cfg.bot_name, cid, payload)
-        except Exception:
-            pass  # some servers apply on next refresh from the saved config
-        log(f"substituted {cid} -> bench config {param_sig(new_cfg)}")
+            if bot:
+                await live.controllers.update_bot_controller_config(bot, cid, payload)
+        except Exception as e:
+            log(f"  (saved config updated; live-apply note: {str(e)[:50]})")
+        log(f"✅ substituted {cid} on {bot} -> {param_sig(new_cfg)}")
+        _tg(cfg, f"🔄 botcamp agent substituted {cid} on {bot} → bench cfg {param_sig(new_cfg)}")
         return True
     except Exception as e:
         log(f"substitution of {cid} FAILED: {str(e)[:80]}")
+        _tg(cfg, f"⚠️ botcamp agent: substitution of {cid} FAILED: {str(e)[:80]}")
         return False
+
+
+async def cold_start_deploy(live, cfg: Config, bench: list[dict], need: int, log) -> Optional[str]:
+    """The AGENT deploys its own fresh fleet: `need` pmm_mister controllers as a NEW bot.
+    Configs: top eligible bench first, else random variants (the cold-start search).
+    Returns the new bot instance name, or None (dry_run or failure)."""
+    import time as _t, random as _r
+    rng = _r.Random()
+    elig = bench_eligible(bench, cfg.min_positive_windows)
+    ts = _t.strftime("%Y%m%d%H%M%S")
+    chosen = []
+    for i in range(need):
+        c = dict(elig[i]["config"]) if i < len(elig) else random_variant(cfg, rng)
+        c["connector_name"] = cfg.connector_name
+        c["trading_pair"] = cfg.trading_pair
+        c["total_amount_quote"] = round(cfg.capital_quote / max(1, cfg.fleet_size), 2)
+        cid = f"botcamp-{cfg.trading_pair.lower().replace('-', '')}-{i}-{ts}"
+        c["id"] = cid
+        chosen.append((cid, c))
+    if cfg.dry_run:
+        log(f"[dry_run] cold-start would deploy {need} controllers {[c for c, _ in chosen]} as new bot")
+        return None
+    instance = f"{cfg.bot_name}-{ts}"
+    names = []
+    for cid, c in chosen:
+        await live.controllers.create_or_update_controller_config(cid, c)
+        names.append(cid)
+    budget = cfg.capital_quote
+    try:
+        res = await live.bot_orchestration.deploy_v2_controllers(
+            instance_name=instance, credentials_profile=cfg.credentials_profile,
+            controllers_config=names,
+            max_global_drawdown_quote=round(budget * 0.5),
+            max_controller_drawdown_quote=round(budget / max(1, cfg.fleet_size)),
+            image=cfg.deploy_image)
+        log(f"🚀 cold-start deployed {need} controllers as {instance}: {str(res)[:80]}")
+        _tg(cfg, f"🚀 botcamp agent cold-start: {need} {cfg.trading_pair} controllers (${budget:.0f}) → {instance}")
+        return instance
+    except Exception as e:
+        log(f"cold-start deploy FAILED: {str(e)[:120]}")
+        _tg(cfg, f"⚠️ botcamp agent cold-start FAILED: {str(e)[:100]}")
+        return None
 
 
 # --------------------------------------------------------------------------- #
@@ -282,22 +422,40 @@ async def run_cycle(live, local, cfg: Config, bench: list[dict], state: dict, lo
     # 2) manage the fleet
     fleet = await read_fleet(live, cfg)
     log(f"fleet: {len(fleet)} live / target {cfg.fleet_size}")
+    # 2a) COLD START — the agent deploys its OWN fleet if under target (mimics the competition:
+    # start the instance from nothing and it spins up its fleet). Grace window prevents re-deploy
+    # while the new controllers are still coming online.
+    if cfg.cold_start and len(fleet) < cfg.fleet_size:
+        if now - float(state.get("cold_start_ts", 0)) > 600:
+            need = cfg.fleet_size - len(fleet)
+            log(f"cold-start: {len(fleet)}/{cfg.fleet_size} live → deploying {need}")
+            inst = await cold_start_deploy(live, cfg, bench, need, log)
+            if inst:
+                state["cold_start_ts"] = now
+                state["cold_start_bot"] = inst
+                _save(STATE_STORE, state)
+            return bench  # let the new fleet come online before managing it
     recently_failed = set(state.get("recently_failed", []))
+    # churn cap: count substitutions in the last rolling hour
+    sub_times = [t for t in state.get("sub_times", []) if now - t < 3600]
     to_sub = check_triggers(fleet, state, cfg, now)
     for cid, reason in to_sub:
-        pick = select_substitute(bench, cfg.min_positive_windows,
-                                 exclude_sigs=recently_failed)
+        if len(sub_times) >= cfg.max_subs_per_hour:
+            log(f"⏸️ churn cap: {len(sub_times)}/{cfg.max_subs_per_hour} subs this hour — deferring {cid}")
+            continue
+        pick = select_substitute(bench, cfg.min_positive_windows, exclude_sigs=recently_failed)
         if not pick:
             log(f"{cid} needs sub ({reason}) but bench has no eligible config yet")
             continue
         log(f"SUBSTITUTE {cid}: {reason}")
-        if await apply_substitution(live, cfg, cid, pick["config"], log):
-            # remember what just failed so we don't redeploy it immediately
+        if await apply_substitution(live, cfg, cid, fleet[cid].get("bot"), pick["config"], fleet, log):
+            sub_times.append(now)
             dead_sig = state.get("live_sig", {}).get(cid)
             if dead_sig:
-                recently_failed.add(dead_sig)
+                recently_failed.add(dead_sig)  # don't redeploy the config that just failed
             state.setdefault("live_sig", {})[cid] = pick["sig"]
             state["vol_hist"].pop(cid, None)  # reset the no-trade clock for the new config
+    state["sub_times"] = sub_times
     state["recently_failed"] = list(recently_failed)[-20:]  # bounded memory
     _save(STATE_STORE, state)
     return bench
@@ -324,7 +482,11 @@ async def run(config: Config, context: ContextTypes.DEFAULT_TYPE) -> str:
         if seed:
             bench = seed
             log(f"seeded bench from fallback: {len(bench)} configs")
-    state = _load(STATE_STORE, {"vol_hist": {}, "live_sig": {}, "recently_failed": []})
+    state = _load(STATE_STORE, {"vol_hist": {}, "live_sig": {}, "recently_failed": [], "sub_times": []})
+
+    mode = "DRY-RUN" if config.dry_run else "LIVE"
+    _tg(config, f"🟢 botcamp MM agent started [{mode}] — {config.trading_pair} fleet {config.fleet_size}, "
+                f"triggers ≤{config.sub_upnl} uPnL / {config.sub_no_trade_h}h, churn cap {config.max_subs_per_hour}/h")
 
     try:
         while True:
