@@ -64,8 +64,26 @@ def main():
         if hb_age is None:
             why.append("no heartbeat")
         elif hb_age >= STALE_SEC:
-            why.append(f"heartbeat stale {hb_age:.0f}s")
+            why.append(f"heartbeat stale {hb_age / 60:.0f}min")
         reason = ", ".join(why)
+        # DIAGNOSE why it died — capture the last instance's error/result + heartbeat status,
+        # so the alert explains the failure instead of blind-restarting.
+        diag = []
+        latest = sorted(insts, key=lambda i: str(i.get("created_at", "")))[-1] if insts else None
+        if latest:
+            diag.append(f"last instance {latest.get('instance_id')} status={latest.get('status')}")
+            if latest.get("error"):
+                diag.append(f"error={str(latest['error'])[:140]}")
+            if latest.get("last_result"):
+                diag.append(f"last_result={str(latest['last_result'])[:140]}")
+        if os.path.exists(HEARTBEAT):
+            try:
+                hb = json.load(open(HEARTBEAT))
+                diag.append(f"hb_status={hb.get('status')} dry_run={hb.get('dry_run')}")
+            except Exception:
+                pass
+        diag_s = " | ".join(diag) if diag else "no diagnostics available"
+        print(f"{stamp} UNHEALTHY ({reason}) — {diag_s}")
         for i in running:  # clear any wedged instance before restarting
             try:
                 _api("POST", f"/instances/{i['instance_id']}/stop", tok)
@@ -73,8 +91,8 @@ def main():
                 pass
         r = _api("POST", "/start", tok, {"routine_name": "botcamp_mm_agent",
                                          "server_name": "brigado", "config": CFG})
-        print(f"{stamp} RESTARTED ({reason}) -> {r.get('instance_id')}")
-        _tg(f"🔧 botcamp watchdog: agent unhealthy ({reason}) → restarted {r.get('instance_id')}")
+        print(f"{stamp} RESTARTED -> {r.get('instance_id')}")
+        _tg(f"🔧 botcamp watchdog: agent unhealthy ({reason})\nWHY: {diag_s}\n→ restarted {r.get('instance_id')}")
     except Exception as e:
         print(f"{stamp} watchdog ERROR: {e}")
         _tg(f"⚠️ botcamp watchdog error: {str(e)[:120]}")

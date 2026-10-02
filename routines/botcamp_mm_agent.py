@@ -61,7 +61,7 @@ class Config(BaseModel):
     window_hours: int = Field(default=24, description="Length of each bench window")
     min_positive_windows: int = Field(default=5, description="Config eligible only if positive in >= this many windows")
     resolution: str = Field(default="1s", description="Backtest resolution")
-    trade_cost: float = Field(default=0.0, description="Maker fee fraction (set once Gate tier confirmed; 0 = free maker)")
+    trade_cost: float = Field(default=0.0004, description="Maker fee fraction — Gate VIP10 spot maker = 0.04% (4bp), per the live rate card. Bench ranks fee-aware; spreads must clear this.")
     variants_per_cycle: int = Field(default=2, description="New random variants backtested per cycle")
     # loop timing
     cycle_sleep_sec: int = Field(default=120, description="Pause between cycles")
@@ -115,7 +115,7 @@ def base_config(cfg: Config) -> dict:
         "connector_name": cfg.connector_name, "trading_pair": cfg.trading_pair,
         "total_amount_quote": round(cfg.capital_quote / max(1, cfg.fleet_size), 2),
         # tunable (random_variant overrides these)
-        "buy_spreads": [0.0005], "sell_spreads": [0.0005], "take_profit": 0.0001,
+        "buy_spreads": [0.001], "sell_spreads": [0.001], "take_profit": 0.0005,  # > 4bp Gate maker fee
         "min_base_pct": 0.2, "target_base_pct": 0.5, "max_base_pct": 0.8,
         "executor_refresh_time": 300,
         "buy_position_effectivization_time": 900, "sell_position_effectivization_time": 900,
@@ -136,8 +136,9 @@ def base_config(cfg: Config) -> dict:
     }
 
 
-_SPREADS = [0.0003, 0.0005, 0.0008, 0.0012, 0.002]
-_TPS = [0.00005, 0.0001, 0.0002, 0.0004]
+# spreads must clear the Gate VIP10 maker fee (4bp) to profit on spread capture -> all >= 6bp
+_SPREADS = [0.0006, 0.001, 0.0015, 0.0025, 0.004]
+_TPS = [0.0003, 0.0005, 0.0008, 0.0012]
 _EFF = [600, 900, 1800, 2700]
 _REFRESH = [120, 300, 600]
 _BANDS = [(0.2, 0.5, 0.8), (0.1, 0.4, 0.7), (0.3, 0.5, 0.7), (0.25, 0.5, 0.75)]
@@ -463,6 +464,7 @@ async def run_cycle(live, local, cfg: Config, bench: list[dict], state: dict, lo
             state["sub_times"] = sub_times
             state["recently_failed"] = list(recently_failed)[-20:]
         _save(STATE_STORE, state)
+        _write_heartbeat(cfg, state, status, len(bench), log)  # fresh signal BEFORE the slow bench build
         # 2) grow the bench (slower; after the fleet is handled)
         bench = await grow_bench(local, cfg, bench, log)
         _save(BENCH_STORE, bench)
