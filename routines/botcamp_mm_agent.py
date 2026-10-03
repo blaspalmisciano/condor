@@ -53,9 +53,9 @@ def _p(cfg, kind: str) -> str:
 
 class Config(BaseModel):
     """Autonomous MM competition agent — continuous bench + fleet manager."""
-    trading_pair: str = Field(default="BTC-USDT", description="Pair to market-make")
+    trading_pair: str = Field(default="ATH-USDT", description="Pair to market-make (Gate: ATH natural spread ~9.8bp > 8bp fee)")
     connector_name: str = Field(default="gate_io", description="Exchange connector")
-    fleet_size: int = Field(default=2, description="Live controllers to keep running")
+    fleet_size: int = Field(default=4, description="Live controllers to keep running")
     capital_quote: float = Field(default=800.0, description="Total quote capital (split across fleet)")
     # substitution rules
     sub_upnl: float = Field(default=-20.0, description="Substitute at <= this unrealized PnL")
@@ -119,19 +119,20 @@ def base_config(cfg: Config) -> dict:
         "controller_name": "pmm_mister", "controller_type": "generic",
         "connector_name": cfg.connector_name, "trading_pair": cfg.trading_pair,
         "total_amount_quote": round(cfg.capital_quote / max(1, cfg.fleet_size), 2),
-        # tunable (random_variant overrides these)
-        "buy_spreads": [0.001], "sell_spreads": [0.001], "take_profit": 0.0012,  # TP 12bp > 8bp round-trip fee → profit
-        "min_base_pct": 0.2, "target_base_pct": 0.5, "max_base_pct": 0.8,
-        "executor_refresh_time": 300,
-        "buy_position_effectivization_time": 900, "sell_position_effectivization_time": 900,
+        # VALIDATED profit setup: tight 3-level ladder inside the natural spread, TP > fee, fast turnover
+        "buy_spreads": [0.0005, 0.0006, 0.0007], "sell_spreads": [0.0005, 0.0006, 0.0007],  # 5/6/7bp ladder
+        "take_profit": 0.0012,                                 # 12bp > 8bp round-trip fee → +4bp/trip
+        "min_base_pct": 0.3, "target_base_pct": 0.5, "max_base_pct": 0.7,  # balanced → both sides quote
+        "executor_refresh_time": 60,                           # track mid
+        "buy_position_effectivization_time": 90, "sell_position_effectivization_time": 90,  # close fast, re-quote
         # structural (required for the controller to actually quote)
-        "buy_amounts_pct": ["1"], "sell_amounts_pct": ["1"],
+        "buy_amounts_pct": ["0.34", "0.33", "0.33"], "sell_amounts_pct": ["0.34", "0.33", "0.33"],  # split capital across the 3 levels (sum=1, live-safe)
         "buy_cooldown_time": 10, "sell_cooldown_time": 10,
         "max_active_executors_by_level": 20,
         "open_order_type": 3, "take_profit_order_type": 3,
         "tick_mode": False, "price_distance_tolerance": "0.0003",
         "refresh_tolerance": "0.0003", "tolerance_scaling": "1.2", "min_skew": "1",  # 3bp: re-quote to track mid (12bp=dead)
-        "portfolio_allocation": "0.3", "leverage": 1, "position_mode": "ONEWAY",  # 0.025 made $2.50 orders (< Binance min notional) → no quoting; 0.3 → ~$30 orders
+        "portfolio_allocation": "0.5", "leverage": 1, "position_mode": "ONEWAY",  # ~$100 across the 3-level ladder
         "position_side": "BUY", "position_profit_protection": True,
         "manual_kill_switch": False, "initial_positions": [],
         # global safety (kept conservative; the organizers also impose hard limits)
@@ -389,7 +390,10 @@ async def cold_start_deploy(live, cfg: Config, bench: list[dict], need: int, log
     ts = _t.strftime("%Y%m%d%H%M%S")
     chosen = []
     for i in range(need):
-        c = dict(elig[i]["config"]) if i < len(elig) else random_variant(cfg, rng)
+        # SEEDED, not random: deploy the validated base config (or a top bench winner if one
+        # exists). Random variants are only ever used by the bench builder for backtest
+        # candidates — never deployed cold, so the scored run starts on a known-good config.
+        c = dict(elig[i]["config"]) if i < len(elig) else base_config(cfg)
         c["connector_name"] = cfg.connector_name
         c["trading_pair"] = cfg.trading_pair
         c["total_amount_quote"] = round(cfg.capital_quote / max(1, cfg.fleet_size), 2)

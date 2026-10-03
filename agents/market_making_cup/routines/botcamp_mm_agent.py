@@ -40,17 +40,22 @@ from routines.botcamp_bench import (
 
 CONTINUOUS = True
 
-BENCH_STORE = "data/botcamp_bench.json"
 SEED_BENCH = "agents/market_making_cup/sample_configs/bench_seed.json"  # shipped fallback (egress hedge)
-STATE_STORE = "data/botcamp_mm_state.json"
-HEARTBEAT = "data/botcamp_mm_heartbeat.json"  # written every cycle — the "is it alive" signal
+
+
+def _p(cfg, kind: str) -> str:
+    """Pair-specific store path so multiple instances (different pairs) never share state."""
+    tag = cfg.trading_pair.replace("-", "").lower()
+    return {"bench": f"data/botcamp_bench_{tag}.json",
+            "state": f"data/botcamp_state_{tag}.json",
+            "hb": f"data/botcamp_hb_{tag}.json"}[kind]
 
 
 class Config(BaseModel):
     """Autonomous MM competition agent — continuous bench + fleet manager."""
-    trading_pair: str = Field(default="BTC-USDT", description="Pair to market-make")
+    trading_pair: str = Field(default="ATH-USDT", description="Pair to market-make (Gate: ATH natural spread ~9.8bp > 8bp fee)")
     connector_name: str = Field(default="gate_io", description="Exchange connector")
-    fleet_size: int = Field(default=2, description="Live controllers to keep running")
+    fleet_size: int = Field(default=4, description="Live controllers to keep running")
     capital_quote: float = Field(default=800.0, description="Total quote capital (split across fleet)")
     # substitution rules
     sub_upnl: float = Field(default=-20.0, description="Substitute at <= this unrealized PnL")
@@ -114,19 +119,20 @@ def base_config(cfg: Config) -> dict:
         "controller_name": "pmm_mister", "controller_type": "generic",
         "connector_name": cfg.connector_name, "trading_pair": cfg.trading_pair,
         "total_amount_quote": round(cfg.capital_quote / max(1, cfg.fleet_size), 2),
-        # tunable (random_variant overrides these)
-        "buy_spreads": [0.001], "sell_spreads": [0.001], "take_profit": 0.0005,  # > 4bp Gate maker fee
-        "min_base_pct": 0.2, "target_base_pct": 0.5, "max_base_pct": 0.8,
-        "executor_refresh_time": 300,
-        "buy_position_effectivization_time": 900, "sell_position_effectivization_time": 900,
+        # VALIDATED profit setup: tight 3-level ladder inside the natural spread, TP > fee, fast turnover
+        "buy_spreads": [0.0005, 0.0006, 0.0007], "sell_spreads": [0.0005, 0.0006, 0.0007],  # 5/6/7bp ladder
+        "take_profit": 0.0012,                                 # 12bp > 8bp round-trip fee → +4bp/trip
+        "min_base_pct": 0.3, "target_base_pct": 0.5, "max_base_pct": 0.7,  # balanced → both sides quote
+        "executor_refresh_time": 60,                           # track mid
+        "buy_position_effectivization_time": 90, "sell_position_effectivization_time": 90,  # close fast, re-quote
         # structural (required for the controller to actually quote)
-        "buy_amounts_pct": ["1"], "sell_amounts_pct": ["1"],
+        "buy_amounts_pct": ["0.34", "0.33", "0.33"], "sell_amounts_pct": ["0.34", "0.33", "0.33"],  # split capital across the 3 levels (sum=1, live-safe)
         "buy_cooldown_time": 10, "sell_cooldown_time": 10,
         "max_active_executors_by_level": 20,
         "open_order_type": 3, "take_profit_order_type": 3,
         "tick_mode": False, "price_distance_tolerance": "0.0003",
-        "refresh_tolerance": "0.0012", "tolerance_scaling": "1.2", "min_skew": "1",
-        "portfolio_allocation": "0.3", "leverage": 1, "position_mode": "ONEWAY",  # 0.025 made $2.50 orders (< Binance min notional) → no quoting; 0.3 → ~$30 orders
+        "refresh_tolerance": "0.0003", "tolerance_scaling": "1.2", "min_skew": "1",  # 3bp: re-quote to track mid (12bp=dead)
+        "portfolio_allocation": "0.5", "leverage": 1, "position_mode": "ONEWAY",  # ~$100 across the 3-level ladder
         "position_side": "BUY", "position_profit_protection": True,
         "manual_kill_switch": False, "initial_positions": [],
         # global safety (kept conservative; the organizers also impose hard limits)
@@ -138,10 +144,10 @@ def base_config(cfg: Config) -> dict:
 
 # spreads must clear the 4bp Gate maker fee but stay tight enough to actually fill -> 6-20bp
 # (40bp was too wide to ever fill on BTC-USDT in the overnight test)
-_SPREADS = [0.0006, 0.0008, 0.001, 0.0015, 0.002]
-_TPS = [0.0003, 0.0005, 0.0008, 0.0012]
-_EFF = [600, 900, 1800, 2700]
-_REFRESH = [120, 300, 600]
+_SPREADS = [0.0005, 0.0006, 0.0007]  # concentrate TIGHT where fills happen (all 4 controllers work)
+_TPS = [0.001, 0.0012, 0.0015, 0.002]  # all > 8bp round-trip fee → profit-positive per round trip
+_EFF = [120, 300, 600, 900]                          # volume: shorter holds = faster turnover
+_REFRESH = [30, 60, 120, 300]                        # volume: faster re-quote = more fills
 _BANDS = [(0.2, 0.5, 0.8), (0.1, 0.4, 0.7), (0.3, 0.5, 0.7), (0.25, 0.5, 0.75)]
 
 
@@ -384,7 +390,10 @@ async def cold_start_deploy(live, cfg: Config, bench: list[dict], need: int, log
     ts = _t.strftime("%Y%m%d%H%M%S")
     chosen = []
     for i in range(need):
-        c = dict(elig[i]["config"]) if i < len(elig) else random_variant(cfg, rng)
+        # SEEDED, not random: deploy the validated base config (or a top bench winner if one
+        # exists). Random variants are only ever used by the bench builder for backtest
+        # candidates — never deployed cold, so the scored run starts on a known-good config.
+        c = dict(elig[i]["config"]) if i < len(elig) else base_config(cfg)
         c["connector_name"] = cfg.connector_name
         c["trading_pair"] = cfg.trading_pair
         c["total_amount_quote"] = round(cfg.capital_quote / max(1, cfg.fleet_size), 2)
@@ -423,7 +432,7 @@ def _write_heartbeat(cfg: Config, state: dict, status: str, bench_n: int, log):
     """The 'is it alive' signal — written EVERY cycle. The external watchdog reads this; a
     stale heartbeat means the agent is wedged (running-but-dead) and must be restarted."""
     try:
-        _save(HEARTBEAT, {"ts": int(time.time()), "status": status, "pair": cfg.trading_pair,
+        _save(_p(cfg, "hb"), {"ts": int(time.time()), "status": status, "pair": cfg.trading_pair,
                           "fleet_size": cfg.fleet_size, "bench": bench_n, "dry_run": cfg.dry_run,
                           "cold_start_bot": state.get("cold_start_bot")})
     except Exception as e:
@@ -467,11 +476,11 @@ async def run_cycle(live, local, cfg: Config, bench: list[dict], state: dict, lo
                     state["vol_hist"].pop(cid, None)
             state["sub_times"] = sub_times
             state["recently_failed"] = list(recently_failed)[-20:]
-        _save(STATE_STORE, state)
+        _save(_p(cfg, "state"), state)
         _write_heartbeat(cfg, state, status, len(bench), log)  # fresh signal BEFORE the slow bench build
         # 2) grow the bench (slower; after the fleet is handled)
         bench = await grow_bench(local, cfg, bench, log)
-        _save(BENCH_STORE, bench)
+        _save(_p(cfg, "bench"), bench)
     except Exception as e:
         status = f"error: {str(e)[:100]}"
         log(status)
@@ -494,13 +503,13 @@ async def run(config: Config, context: ContextTypes.DEFAULT_TYPE) -> str:
     await local.init()
 
     # seed bench from the shipped fallback if we have nothing yet (egress hedge)
-    bench = _load(BENCH_STORE, [])
+    bench = _load(_p(config, "bench"), [])
     if not bench:
         seed = _load(SEED_BENCH, [])
         if seed:
             bench = seed
             log(f"seeded bench from fallback: {len(bench)} configs")
-    state = _load(STATE_STORE, {"vol_hist": {}, "live_sig": {}, "recently_failed": [], "sub_times": []})
+    state = _load(_p(config, "state"), {"vol_hist": {}, "live_sig": {}, "recently_failed": [], "sub_times": []})
 
     mode = "DRY-RUN" if config.dry_run else "LIVE"
     _tg(config, f"🟢 botcamp MM agent started [{mode}] — {config.trading_pair} fleet {config.fleet_size}, "

@@ -15,10 +15,10 @@ skills: []
 controllers:
 - generic/pmm_mister     # STOCK Hummingbot controller — this agent operates it; no custom controller is shipped
 default_config:
-  trading_pair: BTC-USDT
+  trading_pair: ATH-USDT
   connector_name: gate_io
   capital_quote: 800
-  fleet_size: 2
+  fleet_size: 4
 ---
 
 # Market Making Cup
@@ -58,7 +58,11 @@ No warmup grace, no global kill — continuous rotation to the best-benched conf
 risk management on a bounded stake.
 
 ## Market & fees
-Gate spot, **BTC-USDT** (ETH-USDT optional). **Gate VIP10 spot maker = 0.04% (4bp)** per the
-live rate card, so spreads are set **above the fee** (spread capture must beat 4bp); the bench
-optimizes net of the fee. If the competition grants a maker rebate (Gate MM program, up to
-−1.2bp), spreads can tighten.
+Gate spot, **ATH-USDT**. Pair chosen deliberately: **Gate VIP10 spot maker = 0.04% (4bp)**, so a
+round trip pays ~8bp in fees — profitable only where the **natural spread is wider than the fee**.
+Majors (BTC/ETH/SOL) have sub-1bp natural spreads on Gate → impossible. **ATH-USDT has a persistent
+~9.8bp natural spread** (verified via Gate's API over many samples) with ~$3M/day volume and
+mean-reverting price action — so quoting a tight ladder *inside* that spread, closing at a
+take-profit **above the 8bp round-trip fee**, is net-positive. The config (5–7bp ladder, 12bp
+take-profit) is set for exactly this. If the competition grants a Gate MM-program maker rebate
+(up to −1.2bp), the spreads can tighten further.
