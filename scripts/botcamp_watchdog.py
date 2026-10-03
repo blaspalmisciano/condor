@@ -67,6 +67,18 @@ def main():
             if running and hb_age is not None and hb_age < STALE_SEC:
                 print(f"{stamp} OK {pair} — running, heartbeat {hb_age:.0f}s old")
                 continue
+            # STARTUP GRACE: a just-started instance hasn't written its first heartbeat yet —
+            # don't restart it (that's what spawned duplicates). Give it time to come up.
+            if running:
+                import datetime as _dt
+                ca = max((str(i.get("created_at", "")) for i in insts if _pair_of(i) == pair), default="")
+                try:
+                    age = time.time() - _dt.datetime.fromisoformat(ca.replace("Z", "+00:00")).timestamp()
+                    if age < 600:
+                        print(f"{stamp} {pair}: instance warming up ({age:.0f}s) — grace, skip")
+                        continue
+                except Exception:
+                    pass
             why = []
             if not running:
                 why.append("no running instance")
