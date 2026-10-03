@@ -15,10 +15,10 @@ os.chdir(ROOT)
 HEARTBEAT = "data/botcamp_mm_heartbeat.json"
 STALE_SEC = 2400  # 40 min — a cycle (incl. slow bench build) can run several minutes; only a
                   # truly dead/wedged agent exceeds this. Clean stops are caught by the status check.
-CFG = {"trading_pair": "BTC-USDT", "connector_name": "binance", "fleet_size": 2,
-       "capital_quote": 200, "cold_start": True, "dry_run": False, "variants_per_cycle": 2,
-       "n_windows": 3, "window_hours": 12, "cycle_sleep_sec": 300, "max_subs_per_hour": 2,
-       "use_unrealized_trigger": False}
+CFG = {"trading_pair": "SOL-USDT", "connector_name": "binance", "fleet_size": 6,
+       "capital_quote": 600, "cold_start": True, "dry_run": False, "variants_per_cycle": 3,
+       "n_windows": 3, "window_hours": 12, "cycle_sleep_sec": 300, "max_subs_per_hour": 0,
+       "use_unrealized_trigger": False}  # SOL-USDT discovery run
 CHAT = 6310433268
 
 
