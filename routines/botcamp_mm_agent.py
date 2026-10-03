@@ -138,10 +138,10 @@ def base_config(cfg: Config) -> dict:
 
 # spreads must clear the 4bp Gate maker fee but stay tight enough to actually fill -> 6-20bp
 # (40bp was too wide to ever fill on BTC-USDT in the overnight test)
-_SPREADS = [0.0006, 0.0008, 0.001, 0.0015, 0.002]
-_TPS = [0.0003, 0.0005, 0.0008, 0.0012]
-_EFF = [600, 900, 1800, 2700]
-_REFRESH = [120, 300, 600]
+_SPREADS = [0.0005, 0.0007, 0.001, 0.0012, 0.0015]  # volume: just above 4bp fee (5-15bp), not 40bp
+_TPS = [0.0003, 0.0005, 0.0008]
+_EFF = [120, 300, 600, 900]                          # volume: shorter holds = faster turnover
+_REFRESH = [30, 60, 120, 300]                        # volume: faster re-quote = more fills
 _BANDS = [(0.2, 0.5, 0.8), (0.1, 0.4, 0.7), (0.3, 0.5, 0.7), (0.25, 0.5, 0.75)]
 
 
