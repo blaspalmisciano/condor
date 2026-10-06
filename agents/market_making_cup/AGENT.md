@@ -37,6 +37,11 @@ host already has `pmm_mister`). If the bot container lacks it, `deploy_v2_contro
 the bot but the controller cannot instantiate → 0 executors → 0 trades. All parameter tuning
 (spreads, take-profit, inventory band, effectivization, refresh) is applied to `pmm_mister` configs.
 
+**⚠️ Set `credentials_profile` before launch** (Config field, default `master_account`): it must be
+the name of the **Gate account profile provisioned on your container**. If it names a profile that
+doesn't exist, `deploy_v2_controllers` deploys under a missing profile → the fleet fails to start.
+This is the single launch prerequisite besides the controller file.
+
 ## Self-contained engine (bundled)
 The decision engine lives **inside this agent folder** at `routines/`, so importing the agent
 brings everything it needs:
@@ -49,13 +54,13 @@ Framework modules (`config_manager`, `hummingbot_api_client`, `condor.*`) come f
 image, as with any routine.
 
 ## The loop (`botcamp_mm_agent`)
-- **Bench** — continuously backtest random `pmm_mister` param variants over **7 disjoint
-  daily windows**; rank by **median daily PnL**; keep only configs **positive in ≥5/7
-  windows** (robust across regimes — not a single-window fluke). Ranks **fee-aware**
-  (`trade_cost`), so spreads must clear the venue maker fee. Backtesting runs on **the agent's
-  own Hummingbot API** (same host it trades on, via its candle feed) — set `local_url` only to
-  offload backtests to a separate stack. If the host can't backtest, substitution falls back to
-  `base_config` (`bench_enabled=false`).
+- **Bench** — a ranked pool of `pmm_mister` configs the agent deploys and rotates to.
+  **SHIPPED DEFAULT: `bench_enabled=false`** → the bench is **loaded from the pre-built
+  `sample_configs/bench_seed.json`** (built offline from Gate REST candles), and the agent
+  **never backtests at the venue** — Gate historical candles aren't fetchable on the
+  competition infra, so this is deliberate. (`bench_enabled=true` is dev-only: it would
+  continuously backtest random variants over 7 disjoint daily windows, rank fee-aware by
+  median daily PnL, and grow the bench live — only where a candle feed works.)
 - **Fleet** — keep `fleet_size` controllers live; on cold start the agent **deploys its own
   fleet** on the validated `base_config`; it **substitutes** any controller with **no new
   volume for ≥ 2h** for the **top eligible bench config** (the current best robust winner),

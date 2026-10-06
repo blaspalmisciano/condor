@@ -40,7 +40,10 @@ from routines.botcamp_bench import (
 
 CONTINUOUS = True
 
-SEED_BENCH = "agents/market_making_cup/sample_configs/bench_seed.json"  # shipped fallback (egress hedge)
+import os as _os
+# Resolve the shipped bench relative to THIS file (bundled layout: <agent>/routines/ -> <agent>/sample_configs/),
+# so it loads regardless of the process cwd on the competition infra. Dev cwd path is a fallback at load time.
+SEED_BENCH = _os.path.join(_os.path.dirname(_os.path.abspath(__file__)), "..", "sample_configs", "bench_seed.json")
 
 
 def _p(cfg, kind: str) -> str:
@@ -73,15 +76,15 @@ class Config(BaseModel):
     cycle_sleep_sec: int = Field(default=120, description="Pause between cycles")
     # infra
     local_url: str = Field(default="", description="SEPARATE backtest API url. Leave EMPTY on the competition container → the bench backtests on the agent's own live API. Set only for dev (e.g. brigado, which freezes if it backtests on its own live API → point this at a separate stack).")
-    local_user: str = Field(default="elamigo")
-    local_pass: str = Field(default="barabit")
+    local_user: str = Field(default="", description="Only used if local_url is set (a separate backtest stack); blank for a venue launch")
+    local_pass: str = Field(default="")
     credentials_profile: str = Field(default="master_account", description="Account/credentials profile to deploy under — the organizers provision this on their container; we never ship credentials.")
     deploy_image: str = Field(default="hummingbot/hummingbot:latest")
     bot_name: str = Field(default="botcamp-mm", description="Bot instance that hosts the fleet")
     dry_run: bool = Field(default=False, description="LIVE by default (C1 fix: an organizer launch from default_config MUST trade). Set true only for offline/integration testing.")
     # Stage-1 live safeguards
     max_subs_per_hour: int = Field(default=3, description="Churn cap — max substitutions per rolling hour (runaway guard)")
-    tg_chat_id: int = Field(default=6310433268, description="Telegram chat for action alerts (0 = off)")
+    tg_chat_id: int = Field(default=0, description="Telegram chat for action alerts (0 = off; set to your chat id to enable)")
     use_unrealized_trigger: bool = Field(default=False, description="Instantaneous unrealized-PnL trigger — OFF by default (sells the bottom on a mean-reverting MM; no-trade trigger is the real signal)")
     cold_start: bool = Field(default=True, description="If fewer than fleet_size controllers are live, deploy fresh ones (random variants / top bench)")
 
@@ -563,7 +566,7 @@ async def run(config: Config, context: ContextTypes.DEFAULT_TYPE) -> str:
     # seed bench from the shipped fallback if we have nothing yet (egress hedge)
     bench = _load(_p(config, "bench"), [])
     if not bench:
-        seed = _load(SEED_BENCH, [])
+        seed = _load(SEED_BENCH, []) or _load("agents/market_making_cup/sample_configs/bench_seed.json", [])
         if seed:
             bench = seed
             log(f"seeded bench from fallback: {len(bench)} configs")
