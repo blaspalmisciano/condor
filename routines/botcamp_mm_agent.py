@@ -375,6 +375,7 @@ async def apply_substitution(live, cfg: Config, cid: str, bot: Optional[str], ne
     try:
         payload = dict(new_cfg)
         payload["id"] = cid  # keep the slot id, swap the params
+        _fix_amounts(payload)  # fail-safe: amounts_pct must match spreads length
         await live.controllers.create_or_update_controller_config(cid, payload)
         try:
             if bot:
@@ -388,6 +389,21 @@ async def apply_substitution(live, cfg: Config, cid: str, bot: Optional[str], ne
         log(f"substitution of {cid} FAILED: {str(e)[:80]}")
         _tg(cfg, f"⚠️ botcamp agent: substitution of {cid} FAILED: {str(e)[:80]}")
         return False
+
+
+def _fix_amounts(c: dict) -> dict:
+    """Ensure buy/sell_amounts_pct have the SAME length as buy/sell_spreads. A mismatch makes the
+    controller fail to start ('number of amounts_pct must match the number of spreads' → 0 executors,
+    0 trades). Applied to EVERY config before deploy/substitution as a fail-safe — bench configs,
+    variants, anything. Splits the budget equally across levels (summing to 1)."""
+    for side in ("buy", "sell"):
+        sp = c.get(f"{side}_spreads") or []
+        n = len(sp) if isinstance(sp, (list, tuple)) else 1
+        n = max(1, n)
+        each = round(1.0 / n, 4)
+        amt = [str(each)] * (n - 1) + [str(round(1.0 - each * (n - 1), 4))]
+        c[f"{side}_amounts_pct"] = amt
+    return c
 
 
 async def cold_start_deploy(live, cfg: Config, bench: list[dict], need: int, log) -> Optional[str]:
@@ -407,6 +423,7 @@ async def cold_start_deploy(live, cfg: Config, bench: list[dict], need: int, log
         c["connector_name"] = cfg.connector_name
         c["trading_pair"] = cfg.trading_pair
         c["total_amount_quote"] = round(cfg.capital_quote / max(1, cfg.fleet_size), 2)
+        _fix_amounts(c)  # fail-safe: amounts_pct must match spreads length or the controller won't start
         cid = f"botcamp-{cfg.trading_pair.lower().replace('-', '')}-{i}-{ts}"
         c["id"] = cid
         chosen.append((cid, c))

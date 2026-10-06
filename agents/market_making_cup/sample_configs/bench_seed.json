@@ -1,6 +1,6 @@
 [
   {
-    "sig": "209fa4bdb14afb5b",
+    "sig": "aa930c4158c72b49",
     "config": {
       "controller_name": "pmm_mister",
       "controller_type": "generic",
@@ -13,22 +13,18 @@
       "sell_spreads": [
         0.0006
       ],
-      "take_profit": 0.0015,
+      "take_profit": 0.002,
       "min_base_pct": 0.3,
       "target_base_pct": 0.5,
       "max_base_pct": 0.7,
       "executor_refresh_time": 60,
-      "buy_position_effectivization_time": 600,
-      "sell_position_effectivization_time": 600,
+      "buy_position_effectivization_time": 90,
+      "sell_position_effectivization_time": 90,
       "buy_amounts_pct": [
-        "0.34",
-        "0.33",
-        "0.33"
+        "1.0"
       ],
       "sell_amounts_pct": [
-        "0.34",
-        "0.33",
-        "0.33"
+        "1.0"
       ],
       "buy_cooldown_time": 10,
       "sell_cooldown_time": 10,
@@ -56,17 +52,17 @@
       "global_tp_activation_from": "min_base"
     },
     "per_window_pnl": [
-      -0.9314,
-      -5.9752,
-      -2.2748
+      -0.5965,
+      -0.9306,
+      -0.6659
     ],
-    "median_pnl": -2.2748,
+    "median_pnl": -0.6659,
     "n_positive": 0,
     "n_windows": 3,
-    "updated": 1791302390
+    "updated": 1791310868
   },
   {
-    "sig": "7ad91576a6bf3cbc",
+    "sig": "21f9d0c5c3233486",
     "config": {
       "controller_name": "pmm_mister",
       "controller_type": "generic",
@@ -79,22 +75,18 @@
       "sell_spreads": [
         0.0006
       ],
-      "take_profit": 0.0015,
+      "take_profit": 0.002,
       "min_base_pct": 0.2,
       "target_base_pct": 0.5,
       "max_base_pct": 0.8,
       "executor_refresh_time": 60,
-      "buy_position_effectivization_time": 600,
-      "sell_position_effectivization_time": 600,
+      "buy_position_effectivization_time": 90,
+      "sell_position_effectivization_time": 90,
       "buy_amounts_pct": [
-        "0.34",
-        "0.33",
-        "0.33"
+        "1.0"
       ],
       "sell_amounts_pct": [
-        "0.34",
-        "0.33",
-        "0.33"
+        "1.0"
       ],
       "buy_cooldown_time": 10,
       "sell_cooldown_time": 10,
@@ -122,289 +114,17 @@
       "global_tp_activation_from": "min_base"
     },
     "per_window_pnl": [
-      -0.9314,
-      -5.9752,
-      -2.2748
+      -0.5965,
+      -0.9306,
+      -0.6659
     ],
-    "median_pnl": -2.2748,
+    "median_pnl": -0.6659,
     "n_positive": 0,
     "n_windows": 3,
-    "updated": 1791302390
+    "updated": 1791310868
   },
   {
-    "sig": "8e729f3c9a2755cf",
-    "config": {
-      "controller_name": "pmm_mister",
-      "controller_type": "generic",
-      "connector_name": "gate_io",
-      "trading_pair": "ATH-USDT",
-      "total_amount_quote": 200.0,
-      "buy_spreads": [
-        0.0005
-      ],
-      "sell_spreads": [
-        0.0005
-      ],
-      "take_profit": 0.0015,
-      "min_base_pct": 0.3,
-      "target_base_pct": 0.5,
-      "max_base_pct": 0.7,
-      "executor_refresh_time": 60,
-      "buy_position_effectivization_time": 600,
-      "sell_position_effectivization_time": 600,
-      "buy_amounts_pct": [
-        "0.34",
-        "0.33",
-        "0.33"
-      ],
-      "sell_amounts_pct": [
-        "0.34",
-        "0.33",
-        "0.33"
-      ],
-      "buy_cooldown_time": 10,
-      "sell_cooldown_time": 10,
-      "max_active_executors_by_level": 20,
-      "open_order_type": 3,
-      "take_profit_order_type": 3,
-      "tick_mode": false,
-      "price_distance_tolerance": "0.0003",
-      "refresh_tolerance": "0.0003",
-      "tolerance_scaling": "1.2",
-      "min_skew": "1",
-      "portfolio_allocation": "1.0",
-      "leverage": 1,
-      "position_mode": "ONEWAY",
-      "position_side": "BUY",
-      "position_profit_protection": true,
-      "manual_kill_switch": false,
-      "initial_positions": [],
-      "global_pnl_reference": "position",
-      "global_sl_enabled": true,
-      "global_stop_loss": "0.01",
-      "global_sl_activation_from": "target_base",
-      "global_tp_enabled": true,
-      "global_take_profit": "0.005",
-      "global_tp_activation_from": "min_base"
-    },
-    "per_window_pnl": [
-      -0.9513,
-      -5.9946,
-      -2.3546
-    ],
-    "median_pnl": -2.3546,
-    "n_positive": 0,
-    "n_windows": 3,
-    "updated": 1791302390
-  },
-  {
-    "sig": "8e6a94f951bbb5cb",
-    "config": {
-      "controller_name": "pmm_mister",
-      "controller_type": "generic",
-      "connector_name": "gate_io",
-      "trading_pair": "ATH-USDT",
-      "total_amount_quote": 200.0,
-      "buy_spreads": [
-        0.0005
-      ],
-      "sell_spreads": [
-        0.0005
-      ],
-      "take_profit": 0.0015,
-      "min_base_pct": 0.2,
-      "target_base_pct": 0.5,
-      "max_base_pct": 0.8,
-      "executor_refresh_time": 60,
-      "buy_position_effectivization_time": 600,
-      "sell_position_effectivization_time": 600,
-      "buy_amounts_pct": [
-        "0.34",
-        "0.33",
-        "0.33"
-      ],
-      "sell_amounts_pct": [
-        "0.34",
-        "0.33",
-        "0.33"
-      ],
-      "buy_cooldown_time": 10,
-      "sell_cooldown_time": 10,
-      "max_active_executors_by_level": 20,
-      "open_order_type": 3,
-      "take_profit_order_type": 3,
-      "tick_mode": false,
-      "price_distance_tolerance": "0.0003",
-      "refresh_tolerance": "0.0003",
-      "tolerance_scaling": "1.2",
-      "min_skew": "1",
-      "portfolio_allocation": "1.0",
-      "leverage": 1,
-      "position_mode": "ONEWAY",
-      "position_side": "BUY",
-      "position_profit_protection": true,
-      "manual_kill_switch": false,
-      "initial_positions": [],
-      "global_pnl_reference": "position",
-      "global_sl_enabled": true,
-      "global_stop_loss": "0.01",
-      "global_sl_activation_from": "target_base",
-      "global_tp_enabled": true,
-      "global_take_profit": "0.005",
-      "global_tp_activation_from": "min_base"
-    },
-    "per_window_pnl": [
-      -0.9513,
-      -5.9946,
-      -2.3546
-    ],
-    "median_pnl": -2.3546,
-    "n_positive": 0,
-    "n_windows": 3,
-    "updated": 1791302390
-  },
-  {
-    "sig": "1ecd6b02f8c963a5",
-    "config": {
-      "controller_name": "pmm_mister",
-      "controller_type": "generic",
-      "connector_name": "gate_io",
-      "trading_pair": "ATH-USDT",
-      "total_amount_quote": 200.0,
-      "buy_spreads": [
-        0.0005,
-        0.0006,
-        0.0007
-      ],
-      "sell_spreads": [
-        0.0005,
-        0.0006,
-        0.0007
-      ],
-      "take_profit": 0.0015,
-      "min_base_pct": 0.3,
-      "target_base_pct": 0.5,
-      "max_base_pct": 0.7,
-      "executor_refresh_time": 60,
-      "buy_position_effectivization_time": 600,
-      "sell_position_effectivization_time": 600,
-      "buy_amounts_pct": [
-        "0.34",
-        "0.33",
-        "0.33"
-      ],
-      "sell_amounts_pct": [
-        "0.34",
-        "0.33",
-        "0.33"
-      ],
-      "buy_cooldown_time": 10,
-      "sell_cooldown_time": 10,
-      "max_active_executors_by_level": 20,
-      "open_order_type": 3,
-      "take_profit_order_type": 3,
-      "tick_mode": false,
-      "price_distance_tolerance": "0.0003",
-      "refresh_tolerance": "0.0003",
-      "tolerance_scaling": "1.2",
-      "min_skew": "1",
-      "portfolio_allocation": "1.0",
-      "leverage": 1,
-      "position_mode": "ONEWAY",
-      "position_side": "BUY",
-      "position_profit_protection": true,
-      "manual_kill_switch": false,
-      "initial_positions": [],
-      "global_pnl_reference": "position",
-      "global_sl_enabled": true,
-      "global_stop_loss": "0.01",
-      "global_sl_activation_from": "target_base",
-      "global_tp_enabled": true,
-      "global_take_profit": "0.005",
-      "global_tp_activation_from": "min_base"
-    },
-    "per_window_pnl": [
-      -0.9513,
-      -5.9946,
-      -2.3546
-    ],
-    "median_pnl": -2.3546,
-    "n_positive": 0,
-    "n_windows": 3,
-    "updated": 1791302390
-  },
-  {
-    "sig": "8b088f7afaeef6f4",
-    "config": {
-      "controller_name": "pmm_mister",
-      "controller_type": "generic",
-      "connector_name": "gate_io",
-      "trading_pair": "ATH-USDT",
-      "total_amount_quote": 200.0,
-      "buy_spreads": [
-        0.0005,
-        0.0006,
-        0.0007
-      ],
-      "sell_spreads": [
-        0.0005,
-        0.0006,
-        0.0007
-      ],
-      "take_profit": 0.0015,
-      "min_base_pct": 0.2,
-      "target_base_pct": 0.5,
-      "max_base_pct": 0.8,
-      "executor_refresh_time": 60,
-      "buy_position_effectivization_time": 600,
-      "sell_position_effectivization_time": 600,
-      "buy_amounts_pct": [
-        "0.34",
-        "0.33",
-        "0.33"
-      ],
-      "sell_amounts_pct": [
-        "0.34",
-        "0.33",
-        "0.33"
-      ],
-      "buy_cooldown_time": 10,
-      "sell_cooldown_time": 10,
-      "max_active_executors_by_level": 20,
-      "open_order_type": 3,
-      "take_profit_order_type": 3,
-      "tick_mode": false,
-      "price_distance_tolerance": "0.0003",
-      "refresh_tolerance": "0.0003",
-      "tolerance_scaling": "1.2",
-      "min_skew": "1",
-      "portfolio_allocation": "1.0",
-      "leverage": 1,
-      "position_mode": "ONEWAY",
-      "position_side": "BUY",
-      "position_profit_protection": true,
-      "manual_kill_switch": false,
-      "initial_positions": [],
-      "global_pnl_reference": "position",
-      "global_sl_enabled": true,
-      "global_stop_loss": "0.01",
-      "global_sl_activation_from": "target_base",
-      "global_tp_enabled": true,
-      "global_take_profit": "0.005",
-      "global_tp_activation_from": "min_base"
-    },
-    "per_window_pnl": [
-      -0.9513,
-      -5.9946,
-      -2.3546
-    ],
-    "median_pnl": -2.3546,
-    "n_positive": 0,
-    "n_windows": 3,
-    "updated": 1791302390
-  },
-  {
-    "sig": "dd8d491389fbf2e4",
+    "sig": "2a3cb708be13d9a4",
     "config": {
       "controller_name": "pmm_mister",
       "controller_type": "generic",
@@ -417,22 +137,18 @@
       "sell_spreads": [
         0.0006
       ],
-      "take_profit": 0.0012,
+      "take_profit": 0.002,
       "min_base_pct": 0.3,
       "target_base_pct": 0.5,
       "max_base_pct": 0.7,
       "executor_refresh_time": 60,
-      "buy_position_effectivization_time": 600,
-      "sell_position_effectivization_time": 600,
+      "buy_position_effectivization_time": 300,
+      "sell_position_effectivization_time": 300,
       "buy_amounts_pct": [
-        "0.34",
-        "0.33",
-        "0.33"
+        "1.0"
       ],
       "sell_amounts_pct": [
-        "0.34",
-        "0.33",
-        "0.33"
+        "1.0"
       ],
       "buy_cooldown_time": 10,
       "sell_cooldown_time": 10,
@@ -460,17 +176,17 @@
       "global_tp_activation_from": "min_base"
     },
     "per_window_pnl": [
-      -0.9914,
-      -5.9752,
-      -2.409
+      -0.5965,
+      -0.9306,
+      -0.6659
     ],
-    "median_pnl": -2.409,
+    "median_pnl": -0.6659,
     "n_positive": 0,
     "n_windows": 3,
-    "updated": 1791302390
+    "updated": 1791310868
   },
   {
-    "sig": "422e379b1822349d",
+    "sig": "20be2656a4c7d321",
     "config": {
       "controller_name": "pmm_mister",
       "controller_type": "generic",
@@ -483,22 +199,18 @@
       "sell_spreads": [
         0.0006
       ],
-      "take_profit": 0.0012,
+      "take_profit": 0.002,
       "min_base_pct": 0.2,
       "target_base_pct": 0.5,
       "max_base_pct": 0.8,
       "executor_refresh_time": 60,
-      "buy_position_effectivization_time": 600,
-      "sell_position_effectivization_time": 600,
+      "buy_position_effectivization_time": 300,
+      "sell_position_effectivization_time": 300,
       "buy_amounts_pct": [
-        "0.34",
-        "0.33",
-        "0.33"
+        "1.0"
       ],
       "sell_amounts_pct": [
-        "0.34",
-        "0.33",
-        "0.33"
+        "1.0"
       ],
       "buy_cooldown_time": 10,
       "sell_cooldown_time": 10,
@@ -526,421 +238,17 @@
       "global_tp_activation_from": "min_base"
     },
     "per_window_pnl": [
-      -0.9914,
-      -5.9752,
-      -2.409
+      -0.5965,
+      -0.9306,
+      -0.6659
     ],
-    "median_pnl": -2.409,
+    "median_pnl": -0.6659,
     "n_positive": 0,
     "n_windows": 3,
-    "updated": 1791302390
+    "updated": 1791310868
   },
   {
-    "sig": "9d6b347591478e96",
-    "config": {
-      "controller_name": "pmm_mister",
-      "controller_type": "generic",
-      "connector_name": "gate_io",
-      "trading_pair": "ATH-USDT",
-      "total_amount_quote": 200.0,
-      "buy_spreads": [
-        0.0005
-      ],
-      "sell_spreads": [
-        0.0005
-      ],
-      "take_profit": 0.0012,
-      "min_base_pct": 0.3,
-      "target_base_pct": 0.5,
-      "max_base_pct": 0.7,
-      "executor_refresh_time": 60,
-      "buy_position_effectivization_time": 600,
-      "sell_position_effectivization_time": 600,
-      "buy_amounts_pct": [
-        "0.34",
-        "0.33",
-        "0.33"
-      ],
-      "sell_amounts_pct": [
-        "0.34",
-        "0.33",
-        "0.33"
-      ],
-      "buy_cooldown_time": 10,
-      "sell_cooldown_time": 10,
-      "max_active_executors_by_level": 20,
-      "open_order_type": 3,
-      "take_profit_order_type": 3,
-      "tick_mode": false,
-      "price_distance_tolerance": "0.0003",
-      "refresh_tolerance": "0.0003",
-      "tolerance_scaling": "1.2",
-      "min_skew": "1",
-      "portfolio_allocation": "1.0",
-      "leverage": 1,
-      "position_mode": "ONEWAY",
-      "position_side": "BUY",
-      "position_profit_protection": true,
-      "manual_kill_switch": false,
-      "initial_positions": [],
-      "global_pnl_reference": "position",
-      "global_sl_enabled": true,
-      "global_stop_loss": "0.01",
-      "global_sl_activation_from": "target_base",
-      "global_tp_enabled": true,
-      "global_take_profit": "0.005",
-      "global_tp_activation_from": "min_base"
-    },
-    "per_window_pnl": [
-      -1.0113,
-      -5.9946,
-      -2.4888
-    ],
-    "median_pnl": -2.4888,
-    "n_positive": 0,
-    "n_windows": 3,
-    "updated": 1791302390
-  },
-  {
-    "sig": "ef5f56840631ee14",
-    "config": {
-      "controller_name": "pmm_mister",
-      "controller_type": "generic",
-      "connector_name": "gate_io",
-      "trading_pair": "ATH-USDT",
-      "total_amount_quote": 200.0,
-      "buy_spreads": [
-        0.0005
-      ],
-      "sell_spreads": [
-        0.0005
-      ],
-      "take_profit": 0.0012,
-      "min_base_pct": 0.2,
-      "target_base_pct": 0.5,
-      "max_base_pct": 0.8,
-      "executor_refresh_time": 60,
-      "buy_position_effectivization_time": 600,
-      "sell_position_effectivization_time": 600,
-      "buy_amounts_pct": [
-        "0.34",
-        "0.33",
-        "0.33"
-      ],
-      "sell_amounts_pct": [
-        "0.34",
-        "0.33",
-        "0.33"
-      ],
-      "buy_cooldown_time": 10,
-      "sell_cooldown_time": 10,
-      "max_active_executors_by_level": 20,
-      "open_order_type": 3,
-      "take_profit_order_type": 3,
-      "tick_mode": false,
-      "price_distance_tolerance": "0.0003",
-      "refresh_tolerance": "0.0003",
-      "tolerance_scaling": "1.2",
-      "min_skew": "1",
-      "portfolio_allocation": "1.0",
-      "leverage": 1,
-      "position_mode": "ONEWAY",
-      "position_side": "BUY",
-      "position_profit_protection": true,
-      "manual_kill_switch": false,
-      "initial_positions": [],
-      "global_pnl_reference": "position",
-      "global_sl_enabled": true,
-      "global_stop_loss": "0.01",
-      "global_sl_activation_from": "target_base",
-      "global_tp_enabled": true,
-      "global_take_profit": "0.005",
-      "global_tp_activation_from": "min_base"
-    },
-    "per_window_pnl": [
-      -1.0113,
-      -5.9946,
-      -2.4888
-    ],
-    "median_pnl": -2.4888,
-    "n_positive": 0,
-    "n_windows": 3,
-    "updated": 1791302390
-  },
-  {
-    "sig": "c671067fe3f3d62a",
-    "config": {
-      "controller_name": "pmm_mister",
-      "controller_type": "generic",
-      "connector_name": "gate_io",
-      "trading_pair": "ATH-USDT",
-      "total_amount_quote": 200.0,
-      "buy_spreads": [
-        0.0005,
-        0.0006,
-        0.0007
-      ],
-      "sell_spreads": [
-        0.0005,
-        0.0006,
-        0.0007
-      ],
-      "take_profit": 0.0012,
-      "min_base_pct": 0.3,
-      "target_base_pct": 0.5,
-      "max_base_pct": 0.7,
-      "executor_refresh_time": 60,
-      "buy_position_effectivization_time": 600,
-      "sell_position_effectivization_time": 600,
-      "buy_amounts_pct": [
-        "0.34",
-        "0.33",
-        "0.33"
-      ],
-      "sell_amounts_pct": [
-        "0.34",
-        "0.33",
-        "0.33"
-      ],
-      "buy_cooldown_time": 10,
-      "sell_cooldown_time": 10,
-      "max_active_executors_by_level": 20,
-      "open_order_type": 3,
-      "take_profit_order_type": 3,
-      "tick_mode": false,
-      "price_distance_tolerance": "0.0003",
-      "refresh_tolerance": "0.0003",
-      "tolerance_scaling": "1.2",
-      "min_skew": "1",
-      "portfolio_allocation": "1.0",
-      "leverage": 1,
-      "position_mode": "ONEWAY",
-      "position_side": "BUY",
-      "position_profit_protection": true,
-      "manual_kill_switch": false,
-      "initial_positions": [],
-      "global_pnl_reference": "position",
-      "global_sl_enabled": true,
-      "global_stop_loss": "0.01",
-      "global_sl_activation_from": "target_base",
-      "global_tp_enabled": true,
-      "global_take_profit": "0.005",
-      "global_tp_activation_from": "min_base"
-    },
-    "per_window_pnl": [
-      -1.0113,
-      -5.9946,
-      -2.4888
-    ],
-    "median_pnl": -2.4888,
-    "n_positive": 0,
-    "n_windows": 3,
-    "updated": 1791302390
-  },
-  {
-    "sig": "78413f79382c47e2",
-    "config": {
-      "controller_name": "pmm_mister",
-      "controller_type": "generic",
-      "connector_name": "gate_io",
-      "trading_pair": "ATH-USDT",
-      "total_amount_quote": 200.0,
-      "buy_spreads": [
-        0.0005,
-        0.0006,
-        0.0007
-      ],
-      "sell_spreads": [
-        0.0005,
-        0.0006,
-        0.0007
-      ],
-      "take_profit": 0.0012,
-      "min_base_pct": 0.2,
-      "target_base_pct": 0.5,
-      "max_base_pct": 0.8,
-      "executor_refresh_time": 60,
-      "buy_position_effectivization_time": 600,
-      "sell_position_effectivization_time": 600,
-      "buy_amounts_pct": [
-        "0.34",
-        "0.33",
-        "0.33"
-      ],
-      "sell_amounts_pct": [
-        "0.34",
-        "0.33",
-        "0.33"
-      ],
-      "buy_cooldown_time": 10,
-      "sell_cooldown_time": 10,
-      "max_active_executors_by_level": 20,
-      "open_order_type": 3,
-      "take_profit_order_type": 3,
-      "tick_mode": false,
-      "price_distance_tolerance": "0.0003",
-      "refresh_tolerance": "0.0003",
-      "tolerance_scaling": "1.2",
-      "min_skew": "1",
-      "portfolio_allocation": "1.0",
-      "leverage": 1,
-      "position_mode": "ONEWAY",
-      "position_side": "BUY",
-      "position_profit_protection": true,
-      "manual_kill_switch": false,
-      "initial_positions": [],
-      "global_pnl_reference": "position",
-      "global_sl_enabled": true,
-      "global_stop_loss": "0.01",
-      "global_sl_activation_from": "target_base",
-      "global_tp_enabled": true,
-      "global_take_profit": "0.005",
-      "global_tp_activation_from": "min_base"
-    },
-    "per_window_pnl": [
-      -1.0113,
-      -5.9946,
-      -2.4888
-    ],
-    "median_pnl": -2.4888,
-    "n_positive": 0,
-    "n_windows": 3,
-    "updated": 1791302390
-  },
-  {
-    "sig": "8d54f6719a1955a8",
-    "config": {
-      "controller_name": "pmm_mister",
-      "controller_type": "generic",
-      "connector_name": "gate_io",
-      "trading_pair": "ATH-USDT",
-      "total_amount_quote": 200.0,
-      "buy_spreads": [
-        0.0007
-      ],
-      "sell_spreads": [
-        0.0007
-      ],
-      "take_profit": 0.0012,
-      "min_base_pct": 0.3,
-      "target_base_pct": 0.5,
-      "max_base_pct": 0.7,
-      "executor_refresh_time": 60,
-      "buy_position_effectivization_time": 600,
-      "sell_position_effectivization_time": 600,
-      "buy_amounts_pct": [
-        "0.34",
-        "0.33",
-        "0.33"
-      ],
-      "sell_amounts_pct": [
-        "0.34",
-        "0.33",
-        "0.33"
-      ],
-      "buy_cooldown_time": 10,
-      "sell_cooldown_time": 10,
-      "max_active_executors_by_level": 20,
-      "open_order_type": 3,
-      "take_profit_order_type": 3,
-      "tick_mode": false,
-      "price_distance_tolerance": "0.0003",
-      "refresh_tolerance": "0.0003",
-      "tolerance_scaling": "1.2",
-      "min_skew": "1",
-      "portfolio_allocation": "1.0",
-      "leverage": 1,
-      "position_mode": "ONEWAY",
-      "position_side": "BUY",
-      "position_profit_protection": true,
-      "manual_kill_switch": false,
-      "initial_positions": [],
-      "global_pnl_reference": "position",
-      "global_sl_enabled": true,
-      "global_stop_loss": "0.01",
-      "global_sl_activation_from": "target_base",
-      "global_tp_enabled": true,
-      "global_take_profit": "0.005",
-      "global_tp_activation_from": "min_base"
-    },
-    "per_window_pnl": [
-      -0.9714,
-      -5.9557,
-      -2.57
-    ],
-    "median_pnl": -2.57,
-    "n_positive": 0,
-    "n_windows": 3,
-    "updated": 1791302390
-  },
-  {
-    "sig": "1c430d5f7b36d7d7",
-    "config": {
-      "controller_name": "pmm_mister",
-      "controller_type": "generic",
-      "connector_name": "gate_io",
-      "trading_pair": "ATH-USDT",
-      "total_amount_quote": 200.0,
-      "buy_spreads": [
-        0.0007
-      ],
-      "sell_spreads": [
-        0.0007
-      ],
-      "take_profit": 0.0012,
-      "min_base_pct": 0.2,
-      "target_base_pct": 0.5,
-      "max_base_pct": 0.8,
-      "executor_refresh_time": 60,
-      "buy_position_effectivization_time": 600,
-      "sell_position_effectivization_time": 600,
-      "buy_amounts_pct": [
-        "0.34",
-        "0.33",
-        "0.33"
-      ],
-      "sell_amounts_pct": [
-        "0.34",
-        "0.33",
-        "0.33"
-      ],
-      "buy_cooldown_time": 10,
-      "sell_cooldown_time": 10,
-      "max_active_executors_by_level": 20,
-      "open_order_type": 3,
-      "take_profit_order_type": 3,
-      "tick_mode": false,
-      "price_distance_tolerance": "0.0003",
-      "refresh_tolerance": "0.0003",
-      "tolerance_scaling": "1.2",
-      "min_skew": "1",
-      "portfolio_allocation": "1.0",
-      "leverage": 1,
-      "position_mode": "ONEWAY",
-      "position_side": "BUY",
-      "position_profit_protection": true,
-      "manual_kill_switch": false,
-      "initial_positions": [],
-      "global_pnl_reference": "position",
-      "global_sl_enabled": true,
-      "global_stop_loss": "0.01",
-      "global_sl_activation_from": "target_base",
-      "global_tp_enabled": true,
-      "global_take_profit": "0.005",
-      "global_tp_activation_from": "min_base"
-    },
-    "per_window_pnl": [
-      -0.9714,
-      -5.9557,
-      -2.57
-    ],
-    "median_pnl": -2.57,
-    "n_positive": 0,
-    "n_windows": 3,
-    "updated": 1791302390
-  },
-  {
-    "sig": "0f7678311ec279d5",
+    "sig": "8744d4cb48b36b42",
     "config": {
       "controller_name": "pmm_mister",
       "controller_type": "generic",
@@ -958,17 +266,13 @@
       "target_base_pct": 0.5,
       "max_base_pct": 0.7,
       "executor_refresh_time": 60,
-      "buy_position_effectivization_time": 600,
-      "sell_position_effectivization_time": 600,
+      "buy_position_effectivization_time": 90,
+      "sell_position_effectivization_time": 90,
       "buy_amounts_pct": [
-        "0.34",
-        "0.33",
-        "0.33"
+        "1.0"
       ],
       "sell_amounts_pct": [
-        "0.34",
-        "0.33",
-        "0.33"
+        "1.0"
       ],
       "buy_cooldown_time": 10,
       "sell_cooldown_time": 10,
@@ -996,17 +300,17 @@
       "global_tp_activation_from": "min_base"
     },
     "per_window_pnl": [
-      -0.8514,
-      -5.9946,
-      -2.6293
+      -0.6165,
+      -0.7907,
+      -0.6859
     ],
-    "median_pnl": -2.6293,
+    "median_pnl": -0.6859,
     "n_positive": 0,
     "n_windows": 3,
-    "updated": 1791302390
+    "updated": 1791310868
   },
   {
-    "sig": "78a8819159a8f1c2",
+    "sig": "63dbd3e56b445eb2",
     "config": {
       "controller_name": "pmm_mister",
       "controller_type": "generic",
@@ -1024,17 +328,13 @@
       "target_base_pct": 0.5,
       "max_base_pct": 0.8,
       "executor_refresh_time": 60,
-      "buy_position_effectivization_time": 600,
-      "sell_position_effectivization_time": 600,
+      "buy_position_effectivization_time": 90,
+      "sell_position_effectivization_time": 90,
       "buy_amounts_pct": [
-        "0.34",
-        "0.33",
-        "0.33"
+        "1.0"
       ],
       "sell_amounts_pct": [
-        "0.34",
-        "0.33",
-        "0.33"
+        "1.0"
       ],
       "buy_cooldown_time": 10,
       "sell_cooldown_time": 10,
@@ -1062,17 +362,141 @@
       "global_tp_activation_from": "min_base"
     },
     "per_window_pnl": [
-      -0.8514,
-      -5.9946,
-      -2.6293
+      -0.6165,
+      -0.7907,
+      -0.6859
     ],
-    "median_pnl": -2.6293,
+    "median_pnl": -0.6859,
     "n_positive": 0,
     "n_windows": 3,
-    "updated": 1791302390
+    "updated": 1791310868
   },
   {
-    "sig": "65e8f3fe64ed8a49",
+    "sig": "ebb4392ec7d40442",
+    "config": {
+      "controller_name": "pmm_mister",
+      "controller_type": "generic",
+      "connector_name": "gate_io",
+      "trading_pair": "ATH-USDT",
+      "total_amount_quote": 200.0,
+      "buy_spreads": [
+        0.0005
+      ],
+      "sell_spreads": [
+        0.0005
+      ],
+      "take_profit": 0.002,
+      "min_base_pct": 0.3,
+      "target_base_pct": 0.5,
+      "max_base_pct": 0.7,
+      "executor_refresh_time": 60,
+      "buy_position_effectivization_time": 300,
+      "sell_position_effectivization_time": 300,
+      "buy_amounts_pct": [
+        "1.0"
+      ],
+      "sell_amounts_pct": [
+        "1.0"
+      ],
+      "buy_cooldown_time": 10,
+      "sell_cooldown_time": 10,
+      "max_active_executors_by_level": 20,
+      "open_order_type": 3,
+      "take_profit_order_type": 3,
+      "tick_mode": false,
+      "price_distance_tolerance": "0.0003",
+      "refresh_tolerance": "0.0003",
+      "tolerance_scaling": "1.2",
+      "min_skew": "1",
+      "portfolio_allocation": "1.0",
+      "leverage": 1,
+      "position_mode": "ONEWAY",
+      "position_side": "BUY",
+      "position_profit_protection": true,
+      "manual_kill_switch": false,
+      "initial_positions": [],
+      "global_pnl_reference": "position",
+      "global_sl_enabled": true,
+      "global_stop_loss": "0.01",
+      "global_sl_activation_from": "target_base",
+      "global_tp_enabled": true,
+      "global_take_profit": "0.005",
+      "global_tp_activation_from": "min_base"
+    },
+    "per_window_pnl": [
+      -0.6165,
+      -0.7907,
+      -0.6859
+    ],
+    "median_pnl": -0.6859,
+    "n_positive": 0,
+    "n_windows": 3,
+    "updated": 1791310868
+  },
+  {
+    "sig": "efd499b1971f7e76",
+    "config": {
+      "controller_name": "pmm_mister",
+      "controller_type": "generic",
+      "connector_name": "gate_io",
+      "trading_pair": "ATH-USDT",
+      "total_amount_quote": 200.0,
+      "buy_spreads": [
+        0.0005
+      ],
+      "sell_spreads": [
+        0.0005
+      ],
+      "take_profit": 0.002,
+      "min_base_pct": 0.2,
+      "target_base_pct": 0.5,
+      "max_base_pct": 0.8,
+      "executor_refresh_time": 60,
+      "buy_position_effectivization_time": 300,
+      "sell_position_effectivization_time": 300,
+      "buy_amounts_pct": [
+        "1.0"
+      ],
+      "sell_amounts_pct": [
+        "1.0"
+      ],
+      "buy_cooldown_time": 10,
+      "sell_cooldown_time": 10,
+      "max_active_executors_by_level": 20,
+      "open_order_type": 3,
+      "take_profit_order_type": 3,
+      "tick_mode": false,
+      "price_distance_tolerance": "0.0003",
+      "refresh_tolerance": "0.0003",
+      "tolerance_scaling": "1.2",
+      "min_skew": "1",
+      "portfolio_allocation": "1.0",
+      "leverage": 1,
+      "position_mode": "ONEWAY",
+      "position_side": "BUY",
+      "position_profit_protection": true,
+      "manual_kill_switch": false,
+      "initial_positions": [],
+      "global_pnl_reference": "position",
+      "global_sl_enabled": true,
+      "global_stop_loss": "0.01",
+      "global_sl_activation_from": "target_base",
+      "global_tp_enabled": true,
+      "global_take_profit": "0.005",
+      "global_tp_activation_from": "min_base"
+    },
+    "per_window_pnl": [
+      -0.6165,
+      -0.7907,
+      -0.6859
+    ],
+    "median_pnl": -0.6859,
+    "n_positive": 0,
+    "n_windows": 3,
+    "updated": 1791310868
+  },
+  {
+    "sig": "341888aa7d3c21a4",
     "config": {
       "controller_name": "pmm_mister",
       "controller_type": "generic",
@@ -1094,17 +518,17 @@
       "target_base_pct": 0.5,
       "max_base_pct": 0.7,
       "executor_refresh_time": 60,
-      "buy_position_effectivization_time": 600,
-      "sell_position_effectivization_time": 600,
+      "buy_position_effectivization_time": 90,
+      "sell_position_effectivization_time": 90,
       "buy_amounts_pct": [
-        "0.34",
-        "0.33",
-        "0.33"
+        "0.3333",
+        "0.3333",
+        "0.3334"
       ],
       "sell_amounts_pct": [
-        "0.34",
-        "0.33",
-        "0.33"
+        "0.3333",
+        "0.3333",
+        "0.3334"
       ],
       "buy_cooldown_time": 10,
       "sell_cooldown_time": 10,
@@ -1132,17 +556,17 @@
       "global_tp_activation_from": "min_base"
     },
     "per_window_pnl": [
-      -0.8514,
-      -5.9946,
-      -2.6293
+      -0.6165,
+      -0.7907,
+      -0.6859
     ],
-    "median_pnl": -2.6293,
+    "median_pnl": -0.6859,
     "n_positive": 0,
     "n_windows": 3,
-    "updated": 1791302390
+    "updated": 1791310868
   },
   {
-    "sig": "34adcaecf637ee51",
+    "sig": "e5405c9316dc6771",
     "config": {
       "controller_name": "pmm_mister",
       "controller_type": "generic",
@@ -1164,17 +588,17 @@
       "target_base_pct": 0.5,
       "max_base_pct": 0.8,
       "executor_refresh_time": 60,
-      "buy_position_effectivization_time": 600,
-      "sell_position_effectivization_time": 600,
+      "buy_position_effectivization_time": 90,
+      "sell_position_effectivization_time": 90,
       "buy_amounts_pct": [
-        "0.34",
-        "0.33",
-        "0.33"
+        "0.3333",
+        "0.3333",
+        "0.3334"
       ],
       "sell_amounts_pct": [
-        "0.34",
-        "0.33",
-        "0.33"
+        "0.3333",
+        "0.3333",
+        "0.3334"
       ],
       "buy_cooldown_time": 10,
       "sell_cooldown_time": 10,
@@ -1202,17 +626,157 @@
       "global_tp_activation_from": "min_base"
     },
     "per_window_pnl": [
-      -0.8514,
-      -5.9946,
-      -2.6293
+      -0.6165,
+      -0.7907,
+      -0.6859
     ],
-    "median_pnl": -2.6293,
+    "median_pnl": -0.6859,
     "n_positive": 0,
     "n_windows": 3,
-    "updated": 1791302390
+    "updated": 1791310868
   },
   {
-    "sig": "01837146b3b7fc85",
+    "sig": "8d81f8976d29a5f5",
+    "config": {
+      "controller_name": "pmm_mister",
+      "controller_type": "generic",
+      "connector_name": "gate_io",
+      "trading_pair": "ATH-USDT",
+      "total_amount_quote": 200.0,
+      "buy_spreads": [
+        0.0005,
+        0.0006,
+        0.0007
+      ],
+      "sell_spreads": [
+        0.0005,
+        0.0006,
+        0.0007
+      ],
+      "take_profit": 0.002,
+      "min_base_pct": 0.3,
+      "target_base_pct": 0.5,
+      "max_base_pct": 0.7,
+      "executor_refresh_time": 60,
+      "buy_position_effectivization_time": 300,
+      "sell_position_effectivization_time": 300,
+      "buy_amounts_pct": [
+        "0.3333",
+        "0.3333",
+        "0.3334"
+      ],
+      "sell_amounts_pct": [
+        "0.3333",
+        "0.3333",
+        "0.3334"
+      ],
+      "buy_cooldown_time": 10,
+      "sell_cooldown_time": 10,
+      "max_active_executors_by_level": 20,
+      "open_order_type": 3,
+      "take_profit_order_type": 3,
+      "tick_mode": false,
+      "price_distance_tolerance": "0.0003",
+      "refresh_tolerance": "0.0003",
+      "tolerance_scaling": "1.2",
+      "min_skew": "1",
+      "portfolio_allocation": "1.0",
+      "leverage": 1,
+      "position_mode": "ONEWAY",
+      "position_side": "BUY",
+      "position_profit_protection": true,
+      "manual_kill_switch": false,
+      "initial_positions": [],
+      "global_pnl_reference": "position",
+      "global_sl_enabled": true,
+      "global_stop_loss": "0.01",
+      "global_sl_activation_from": "target_base",
+      "global_tp_enabled": true,
+      "global_take_profit": "0.005",
+      "global_tp_activation_from": "min_base"
+    },
+    "per_window_pnl": [
+      -0.6165,
+      -0.7907,
+      -0.6859
+    ],
+    "median_pnl": -0.6859,
+    "n_positive": 0,
+    "n_windows": 3,
+    "updated": 1791310868
+  },
+  {
+    "sig": "67a60f0f3ab94213",
+    "config": {
+      "controller_name": "pmm_mister",
+      "controller_type": "generic",
+      "connector_name": "gate_io",
+      "trading_pair": "ATH-USDT",
+      "total_amount_quote": 200.0,
+      "buy_spreads": [
+        0.0005,
+        0.0006,
+        0.0007
+      ],
+      "sell_spreads": [
+        0.0005,
+        0.0006,
+        0.0007
+      ],
+      "take_profit": 0.002,
+      "min_base_pct": 0.2,
+      "target_base_pct": 0.5,
+      "max_base_pct": 0.8,
+      "executor_refresh_time": 60,
+      "buy_position_effectivization_time": 300,
+      "sell_position_effectivization_time": 300,
+      "buy_amounts_pct": [
+        "0.3333",
+        "0.3333",
+        "0.3334"
+      ],
+      "sell_amounts_pct": [
+        "0.3333",
+        "0.3333",
+        "0.3334"
+      ],
+      "buy_cooldown_time": 10,
+      "sell_cooldown_time": 10,
+      "max_active_executors_by_level": 20,
+      "open_order_type": 3,
+      "take_profit_order_type": 3,
+      "tick_mode": false,
+      "price_distance_tolerance": "0.0003",
+      "refresh_tolerance": "0.0003",
+      "tolerance_scaling": "1.2",
+      "min_skew": "1",
+      "portfolio_allocation": "1.0",
+      "leverage": 1,
+      "position_mode": "ONEWAY",
+      "position_side": "BUY",
+      "position_profit_protection": true,
+      "manual_kill_switch": false,
+      "initial_positions": [],
+      "global_pnl_reference": "position",
+      "global_sl_enabled": true,
+      "global_stop_loss": "0.01",
+      "global_sl_activation_from": "target_base",
+      "global_tp_enabled": true,
+      "global_take_profit": "0.005",
+      "global_tp_activation_from": "min_base"
+    },
+    "per_window_pnl": [
+      -0.6165,
+      -0.7907,
+      -0.6859
+    ],
+    "median_pnl": -0.6859,
+    "n_positive": 0,
+    "n_windows": 3,
+    "updated": 1791310868
+  },
+  {
+    "sig": "ef809c37c5b425a3",
     "config": {
       "controller_name": "pmm_mister",
       "controller_type": "generic",
@@ -1225,7 +789,255 @@
       "sell_spreads": [
         0.0007
       ],
-      "take_profit": 0.001,
+      "take_profit": 0.002,
+      "min_base_pct": 0.3,
+      "target_base_pct": 0.5,
+      "max_base_pct": 0.7,
+      "executor_refresh_time": 60,
+      "buy_position_effectivization_time": 90,
+      "sell_position_effectivization_time": 90,
+      "buy_amounts_pct": [
+        "1.0"
+      ],
+      "sell_amounts_pct": [
+        "1.0"
+      ],
+      "buy_cooldown_time": 10,
+      "sell_cooldown_time": 10,
+      "max_active_executors_by_level": 20,
+      "open_order_type": 3,
+      "take_profit_order_type": 3,
+      "tick_mode": false,
+      "price_distance_tolerance": "0.0003",
+      "refresh_tolerance": "0.0003",
+      "tolerance_scaling": "1.2",
+      "min_skew": "1",
+      "portfolio_allocation": "1.0",
+      "leverage": 1,
+      "position_mode": "ONEWAY",
+      "position_side": "BUY",
+      "position_profit_protection": true,
+      "manual_kill_switch": false,
+      "initial_positions": [],
+      "global_pnl_reference": "position",
+      "global_sl_enabled": true,
+      "global_stop_loss": "0.01",
+      "global_sl_activation_from": "target_base",
+      "global_tp_enabled": true,
+      "global_take_profit": "0.005",
+      "global_tp_activation_from": "min_base"
+    },
+    "per_window_pnl": [
+      -0.5766,
+      -0.9107,
+      -1.9539
+    ],
+    "median_pnl": -0.9107,
+    "n_positive": 0,
+    "n_windows": 3,
+    "updated": 1791310868
+  },
+  {
+    "sig": "7a4722b482a776b6",
+    "config": {
+      "controller_name": "pmm_mister",
+      "controller_type": "generic",
+      "connector_name": "gate_io",
+      "trading_pair": "ATH-USDT",
+      "total_amount_quote": 200.0,
+      "buy_spreads": [
+        0.0007
+      ],
+      "sell_spreads": [
+        0.0007
+      ],
+      "take_profit": 0.002,
+      "min_base_pct": 0.2,
+      "target_base_pct": 0.5,
+      "max_base_pct": 0.8,
+      "executor_refresh_time": 60,
+      "buy_position_effectivization_time": 90,
+      "sell_position_effectivization_time": 90,
+      "buy_amounts_pct": [
+        "1.0"
+      ],
+      "sell_amounts_pct": [
+        "1.0"
+      ],
+      "buy_cooldown_time": 10,
+      "sell_cooldown_time": 10,
+      "max_active_executors_by_level": 20,
+      "open_order_type": 3,
+      "take_profit_order_type": 3,
+      "tick_mode": false,
+      "price_distance_tolerance": "0.0003",
+      "refresh_tolerance": "0.0003",
+      "tolerance_scaling": "1.2",
+      "min_skew": "1",
+      "portfolio_allocation": "1.0",
+      "leverage": 1,
+      "position_mode": "ONEWAY",
+      "position_side": "BUY",
+      "position_profit_protection": true,
+      "manual_kill_switch": false,
+      "initial_positions": [],
+      "global_pnl_reference": "position",
+      "global_sl_enabled": true,
+      "global_stop_loss": "0.01",
+      "global_sl_activation_from": "target_base",
+      "global_tp_enabled": true,
+      "global_take_profit": "0.005",
+      "global_tp_activation_from": "min_base"
+    },
+    "per_window_pnl": [
+      -0.5766,
+      -0.9107,
+      -1.9539
+    ],
+    "median_pnl": -0.9107,
+    "n_positive": 0,
+    "n_windows": 3,
+    "updated": 1791310868
+  },
+  {
+    "sig": "eda8dce065f9dbe2",
+    "config": {
+      "controller_name": "pmm_mister",
+      "controller_type": "generic",
+      "connector_name": "gate_io",
+      "trading_pair": "ATH-USDT",
+      "total_amount_quote": 200.0,
+      "buy_spreads": [
+        0.0007
+      ],
+      "sell_spreads": [
+        0.0007
+      ],
+      "take_profit": 0.002,
+      "min_base_pct": 0.3,
+      "target_base_pct": 0.5,
+      "max_base_pct": 0.7,
+      "executor_refresh_time": 60,
+      "buy_position_effectivization_time": 300,
+      "sell_position_effectivization_time": 300,
+      "buy_amounts_pct": [
+        "1.0"
+      ],
+      "sell_amounts_pct": [
+        "1.0"
+      ],
+      "buy_cooldown_time": 10,
+      "sell_cooldown_time": 10,
+      "max_active_executors_by_level": 20,
+      "open_order_type": 3,
+      "take_profit_order_type": 3,
+      "tick_mode": false,
+      "price_distance_tolerance": "0.0003",
+      "refresh_tolerance": "0.0003",
+      "tolerance_scaling": "1.2",
+      "min_skew": "1",
+      "portfolio_allocation": "1.0",
+      "leverage": 1,
+      "position_mode": "ONEWAY",
+      "position_side": "BUY",
+      "position_profit_protection": true,
+      "manual_kill_switch": false,
+      "initial_positions": [],
+      "global_pnl_reference": "position",
+      "global_sl_enabled": true,
+      "global_stop_loss": "0.01",
+      "global_sl_activation_from": "target_base",
+      "global_tp_enabled": true,
+      "global_take_profit": "0.005",
+      "global_tp_activation_from": "min_base"
+    },
+    "per_window_pnl": [
+      -0.5766,
+      -0.9107,
+      -1.9539
+    ],
+    "median_pnl": -0.9107,
+    "n_positive": 0,
+    "n_windows": 3,
+    "updated": 1791310868
+  },
+  {
+    "sig": "b1f95ae68cd33ae3",
+    "config": {
+      "controller_name": "pmm_mister",
+      "controller_type": "generic",
+      "connector_name": "gate_io",
+      "trading_pair": "ATH-USDT",
+      "total_amount_quote": 200.0,
+      "buy_spreads": [
+        0.0007
+      ],
+      "sell_spreads": [
+        0.0007
+      ],
+      "take_profit": 0.002,
+      "min_base_pct": 0.2,
+      "target_base_pct": 0.5,
+      "max_base_pct": 0.8,
+      "executor_refresh_time": 60,
+      "buy_position_effectivization_time": 300,
+      "sell_position_effectivization_time": 300,
+      "buy_amounts_pct": [
+        "1.0"
+      ],
+      "sell_amounts_pct": [
+        "1.0"
+      ],
+      "buy_cooldown_time": 10,
+      "sell_cooldown_time": 10,
+      "max_active_executors_by_level": 20,
+      "open_order_type": 3,
+      "take_profit_order_type": 3,
+      "tick_mode": false,
+      "price_distance_tolerance": "0.0003",
+      "refresh_tolerance": "0.0003",
+      "tolerance_scaling": "1.2",
+      "min_skew": "1",
+      "portfolio_allocation": "1.0",
+      "leverage": 1,
+      "position_mode": "ONEWAY",
+      "position_side": "BUY",
+      "position_profit_protection": true,
+      "manual_kill_switch": false,
+      "initial_positions": [],
+      "global_pnl_reference": "position",
+      "global_sl_enabled": true,
+      "global_stop_loss": "0.01",
+      "global_sl_activation_from": "target_base",
+      "global_tp_enabled": true,
+      "global_take_profit": "0.005",
+      "global_tp_activation_from": "min_base"
+    },
+    "per_window_pnl": [
+      -0.5766,
+      -0.9107,
+      -1.9539
+    ],
+    "median_pnl": -0.9107,
+    "n_positive": 0,
+    "n_windows": 3,
+    "updated": 1791310868
+  },
+  {
+    "sig": "a853c9e141008fa4",
+    "config": {
+      "controller_name": "pmm_mister",
+      "controller_type": "generic",
+      "connector_name": "gate_io",
+      "trading_pair": "ATH-USDT",
+      "total_amount_quote": 200.0,
+      "buy_spreads": [
+        0.0007
+      ],
+      "sell_spreads": [
+        0.0007
+      ],
+      "take_profit": 0.002,
       "min_base_pct": 0.3,
       "target_base_pct": 0.5,
       "max_base_pct": 0.7,
@@ -1233,14 +1045,10 @@
       "buy_position_effectivization_time": 600,
       "sell_position_effectivization_time": 600,
       "buy_amounts_pct": [
-        "0.34",
-        "0.33",
-        "0.33"
+        "1.0"
       ],
       "sell_amounts_pct": [
-        "0.34",
-        "0.33",
-        "0.33"
+        "1.0"
       ],
       "buy_cooldown_time": 10,
       "sell_cooldown_time": 10,
@@ -1268,17 +1076,17 @@
       "global_tp_activation_from": "min_base"
     },
     "per_window_pnl": [
-      -2.1171,
-      -5.9557,
-      -2.8099
+      -0.9858,
+      -0.7319,
+      -6.3826
     ],
-    "median_pnl": -2.8099,
+    "median_pnl": -0.9858,
     "n_positive": 0,
     "n_windows": 3,
-    "updated": 1791302390
+    "updated": 1791310868
   },
   {
-    "sig": "fa1f1d75249043dd",
+    "sig": "f6b7122ecce095a3",
     "config": {
       "controller_name": "pmm_mister",
       "controller_type": "generic",
@@ -1291,7 +1099,7 @@
       "sell_spreads": [
         0.0007
       ],
-      "take_profit": 0.001,
+      "take_profit": 0.002,
       "min_base_pct": 0.2,
       "target_base_pct": 0.5,
       "max_base_pct": 0.8,
@@ -1299,14 +1107,10 @@
       "buy_position_effectivization_time": 600,
       "sell_position_effectivization_time": 600,
       "buy_amounts_pct": [
-        "0.34",
-        "0.33",
-        "0.33"
+        "1.0"
       ],
       "sell_amounts_pct": [
-        "0.34",
-        "0.33",
-        "0.33"
+        "1.0"
       ],
       "buy_cooldown_time": 10,
       "sell_cooldown_time": 10,
@@ -1334,13 +1138,137 @@
       "global_tp_activation_from": "min_base"
     },
     "per_window_pnl": [
-      -2.1171,
-      -5.9557,
-      -2.8099
+      -0.9858,
+      -0.7319,
+      -6.3826
     ],
-    "median_pnl": -2.8099,
+    "median_pnl": -0.9858,
     "n_positive": 0,
     "n_windows": 3,
-    "updated": 1791302390
+    "updated": 1791310868
+  },
+  {
+    "sig": "dc2b3c54e19640bb",
+    "config": {
+      "controller_name": "pmm_mister",
+      "controller_type": "generic",
+      "connector_name": "gate_io",
+      "trading_pair": "ATH-USDT",
+      "total_amount_quote": 200.0,
+      "buy_spreads": [
+        0.0005
+      ],
+      "sell_spreads": [
+        0.0005
+      ],
+      "take_profit": 0.0015,
+      "min_base_pct": 0.3,
+      "target_base_pct": 0.5,
+      "max_base_pct": 0.7,
+      "executor_refresh_time": 60,
+      "buy_position_effectivization_time": 90,
+      "sell_position_effectivization_time": 90,
+      "buy_amounts_pct": [
+        "1.0"
+      ],
+      "sell_amounts_pct": [
+        "1.0"
+      ],
+      "buy_cooldown_time": 10,
+      "sell_cooldown_time": 10,
+      "max_active_executors_by_level": 20,
+      "open_order_type": 3,
+      "take_profit_order_type": 3,
+      "tick_mode": false,
+      "price_distance_tolerance": "0.0003",
+      "refresh_tolerance": "0.0003",
+      "tolerance_scaling": "1.2",
+      "min_skew": "1",
+      "portfolio_allocation": "1.0",
+      "leverage": 1,
+      "position_mode": "ONEWAY",
+      "position_side": "BUY",
+      "position_profit_protection": true,
+      "manual_kill_switch": false,
+      "initial_positions": [],
+      "global_pnl_reference": "position",
+      "global_sl_enabled": true,
+      "global_stop_loss": "0.01",
+      "global_sl_activation_from": "target_base",
+      "global_tp_enabled": true,
+      "global_take_profit": "0.005",
+      "global_tp_activation_from": "min_base"
+    },
+    "per_window_pnl": [
+      -0.6165,
+      -0.9906,
+      -3.6876
+    ],
+    "median_pnl": -0.9906,
+    "n_positive": 0,
+    "n_windows": 3,
+    "updated": 1791310868
+  },
+  {
+    "sig": "a915c439509bf11a",
+    "config": {
+      "controller_name": "pmm_mister",
+      "controller_type": "generic",
+      "connector_name": "gate_io",
+      "trading_pair": "ATH-USDT",
+      "total_amount_quote": 200.0,
+      "buy_spreads": [
+        0.0005
+      ],
+      "sell_spreads": [
+        0.0005
+      ],
+      "take_profit": 0.0015,
+      "min_base_pct": 0.2,
+      "target_base_pct": 0.5,
+      "max_base_pct": 0.8,
+      "executor_refresh_time": 60,
+      "buy_position_effectivization_time": 90,
+      "sell_position_effectivization_time": 90,
+      "buy_amounts_pct": [
+        "1.0"
+      ],
+      "sell_amounts_pct": [
+        "1.0"
+      ],
+      "buy_cooldown_time": 10,
+      "sell_cooldown_time": 10,
+      "max_active_executors_by_level": 20,
+      "open_order_type": 3,
+      "take_profit_order_type": 3,
+      "tick_mode": false,
+      "price_distance_tolerance": "0.0003",
+      "refresh_tolerance": "0.0003",
+      "tolerance_scaling": "1.2",
+      "min_skew": "1",
+      "portfolio_allocation": "1.0",
+      "leverage": 1,
+      "position_mode": "ONEWAY",
+      "position_side": "BUY",
+      "position_profit_protection": true,
+      "manual_kill_switch": false,
+      "initial_positions": [],
+      "global_pnl_reference": "position",
+      "global_sl_enabled": true,
+      "global_stop_loss": "0.01",
+      "global_sl_activation_from": "target_base",
+      "global_tp_enabled": true,
+      "global_take_profit": "0.005",
+      "global_tp_activation_from": "min_base"
+    },
+    "per_window_pnl": [
+      -0.6165,
+      -0.9906,
+      -3.6876
+    ],
+    "median_pnl": -0.9906,
+    "n_positive": 0,
+    "n_windows": 3,
+    "updated": 1791310868
   }
 ]
