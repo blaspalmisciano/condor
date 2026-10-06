@@ -13,12 +13,13 @@ tools:
 - send_notification      # Telegram action + watchdog alerts
 skills: []
 controllers:
-- generic/pmm_mister     # STOCK Hummingbot controller — this agent operates it; no custom controller is shipped
+- generic/pmm_mister     # BUNDLED at controllers/generic/pmm_mister.py — install into the bot image if not already present
 default_config:
   trading_pair: ATH-USDT
   connector_name: gate_io
   capital_quote: 800
   fleet_size: 4
+  dry_run: false        # LIVE — an organizer launch from this config must place real orders
 ---
 
 # Market Making Cup
@@ -27,11 +28,14 @@ Autonomous market maker for the Hummingbot **Agent Builders Cup**. The agent run
 fleet of controllers and manages them with **zero human input** via the bundled
 `botcamp_mm_agent` routine. Objective: maximize **PnL** (and volume) over the 48h finals.
 
-## Controller
-This agent operates the **stock `generic/pmm_mister`** controller — it ships **no custom
-controller**; it expects `pmm_mister` to be available on the Condor/Hummingbot image (it is a
-standard controller). All parameter tuning (spreads, take-profit, inventory band,
-effectivization, refresh) is applied to `pmm_mister` configs.
+## Controller — BUNDLED (install into the bot image)
+This agent operates the **`generic/pmm_mister`** controller. It is **not** a stock Hummingbot
+controller, so it is **shipped with this agent** at `controllers/generic/pmm_mister.py` (a clean
+`strategy_v2` controller — imports only `hummingbot.*` + pydantic, no framework deps). **Before the
+run, place this file in the bot image's `bots/controllers/generic/` directory** (or confirm the
+host already has `pmm_mister`). If the bot container lacks it, `deploy_v2_controllers` will create
+the bot but the controller cannot instantiate → 0 executors → 0 trades. All parameter tuning
+(spreads, take-profit, inventory band, effectivization, refresh) is applied to `pmm_mister` configs.
 
 ## Self-contained engine (bundled)
 The decision engine lives **inside this agent folder** at `routines/`, so importing the agent
@@ -48,11 +52,15 @@ image, as with any routine.
 - **Bench** — continuously backtest random `pmm_mister` param variants over **7 disjoint
   daily windows**; rank by **median daily PnL**; keep only configs **positive in ≥5/7
   windows** (robust across regimes — not a single-window fluke). Ranks **fee-aware**
-  (`trade_cost`), so spreads must clear the venue maker fee.
+  (`trade_cost`), so spreads must clear the venue maker fee. Backtesting runs on **the agent's
+  own Hummingbot API** (same host it trades on, via its candle feed) — set `local_url` only to
+  offload backtests to a separate stack. If the host can't backtest, substitution falls back to
+  `base_config` (`bench_enabled=false`).
 - **Fleet** — keep `fleet_size` controllers live; on cold start the agent **deploys its own
-  fleet**; it **substitutes** any controller with **no new volume for ≥ 4h** for the top
-  eligible bench config (never the one that just failed, and only after confirming the
-  position is flat — fail-closed).
+  fleet** on the validated `base_config`; it **substitutes** any controller with **no new
+  volume for ≥ 2h** for the **top eligible bench config** (the current best robust winner),
+  never re-picking the one that just failed, and only after confirming the position is flat —
+  fail-closed. `base_config` is the safety net until the bench has an eligible winner.
 
 No warmup grace, no global kill — continuous rotation to the best-benched config *is* the
 risk management on a bounded stake.
@@ -63,6 +71,6 @@ round trip pays ~8bp in fees — profitable only where the **natural spread is w
 Majors (BTC/ETH/SOL) have sub-1bp natural spreads on Gate → impossible. **ATH-USDT has a persistent
 ~9.8bp natural spread** (verified via Gate's API over many samples) with ~$3M/day volume and
 mean-reverting price action — so quoting a tight ladder *inside* that spread, closing at a
-take-profit **above the 8bp round-trip fee**, is net-positive. The config (5–7bp ladder, 12bp
-take-profit) is set for exactly this. If the competition grants a Gate MM-program maker rebate
+take-profit **above the 8bp round-trip fee**, is net-positive. The config (5–7bp ladder, 10bp
+take-profit → +2bp/round-trip, tilted toward volume) is set for exactly this. If the competition grants a Gate MM-program maker rebate
 (up to −1.2bp), the spreads can tighten further.

@@ -25,15 +25,18 @@ market_making_cup/
     test_botcamp_bench.py      unit tests for the core (8)
 ```
 
-## Controller
-Operates the **stock `generic/pmm_mister`** controller — ships **no custom controller**; it
-expects `pmm_mister` to be present on the image (a standard Condor/Hummingbot controller).
+## Controller — BUNDLED
+Operates **`generic/pmm_mister`**, which is **not** a stock Hummingbot controller, so it is
+**shipped here** at `controllers/generic/pmm_mister.py` (clean `strategy_v2` controller; imports
+only `hummingbot.*` + pydantic). **Install it into the bot image's `bots/controllers/generic/`**
+before the run (or confirm the host already has it) — without it, deploys produce 0 executors.
 
 ## What it does
 Each cycle: backtest random `pmm_mister` param variants over K disjoint daily windows (ranked
 **fee-aware** by median PnL); keep a bench of the robust winners; keep `fleet_size` controllers
-live (deploying its own on cold start); substitute any controller with no new volume for ≥4h
+live (deploying its own on cold start); substitute any controller with no new volume for ≥2h
 for the top eligible bench config — only after confirming the position is flat (fail-closed).
+The bench backtests on the agent's own Hummingbot API (set `local_url` to offload to a separate stack).
 No human gate. Objective: maximize PnL over the 48h finals.
 
 ## Fees

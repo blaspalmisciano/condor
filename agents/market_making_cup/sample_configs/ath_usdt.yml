@@ -1,5 +1,5 @@
 # Validated ATH-USDT config — Gate spot. Tight 3-level ladder (5/6/7bp) inside ATH's ~9.8bp
-# natural spread; take_profit 12bp > 8bp round-trip fee -> net-positive. See AGENT.md.
+# natural spread; take_profit 10bp > 8bp round-trip fee -> net-positive (+2bp/trip, volume-tilted). See AGENT.md.
 controller_name: pmm_mister
 controller_type: generic
 connector_name: gate_io
@@ -7,7 +7,7 @@ trading_pair: ATH-USDT
 total_amount_quote: 200.0
 buy_spreads: [0.0005, 0.0006, 0.0007]
 sell_spreads: [0.0005, 0.0006, 0.0007]
-take_profit: 0.0012
+take_profit: 0.0010
 min_base_pct: 0.3
 target_base_pct: 0.5
 max_base_pct: 0.7
@@ -26,7 +26,7 @@ price_distance_tolerance: 0.0003
 refresh_tolerance: 0.0003
 tolerance_scaling: 1.2
 min_skew: 1
-portfolio_allocation: 0.5
+portfolio_allocation: 1.0
 leverage: 1
 position_mode: ONEWAY
 position_side: BUY

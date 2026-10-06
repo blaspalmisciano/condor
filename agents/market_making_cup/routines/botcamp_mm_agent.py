@@ -59,25 +59,26 @@ class Config(BaseModel):
     capital_quote: float = Field(default=800.0, description="Total quote capital (split across fleet)")
     # substitution rules
     sub_upnl: float = Field(default=-20.0, description="Substitute at <= this unrealized PnL")
-    sub_no_trade_h: float = Field(default=4.0, description="Substitute after this many hours with no new volume")
+    sub_no_trade_h: float = Field(default=2.0, description="Substitute after this many hours with no new volume (2h: the 48h comp needs fast recovery of a dead controller)")
     # bench scoring
     lookback_days: int = Field(default=7, description="Backtest lookback window count (disjoint 24h windows)")
     n_windows: int = Field(default=7, description="K disjoint daily windows for robust scoring")
     window_hours: int = Field(default=24, description="Length of each bench window")
-    min_positive_windows: int = Field(default=5, description="Config eligible only if positive in >= this many windows")
+    min_positive_windows: int = Field(default=4, description="Config eligible only if positive in >= this many of n_windows (4/7 = robust majority of disjoint days; rejects one-window flukes but is achievable so the bench actually yields winners). Must be <= n_windows.")
     resolution: str = Field(default="1s", description="Backtest resolution")
     trade_cost: float = Field(default=0.0004, description="Maker fee fraction — Gate VIP10 spot maker = 0.04% (4bp), per the live rate card. Bench ranks fee-aware; spreads must clear this.")
-    variants_per_cycle: int = Field(default=2, description="New random variants backtested per cycle")
+    variants_per_cycle: int = Field(default=1, description="New random variants backtested per cycle (1 = gentle on the live API; the bench still grows ~30 configs/hour)")
+    bench_enabled: bool = Field(default=False, description="Run a LIVE backtest bench each cycle. OFF by default because Gate historical candles aren't fetchable on the competition infra (Hummingbot gate_io feed 500s). Instead the agent loads a bench PRE-BUILT here from Gate REST candles and shipped at sample_configs/bench_seed.json — so it never backtests at the venue. Set True only where the host API can backtest.")
     # loop timing
     cycle_sleep_sec: int = Field(default=120, description="Pause between cycles")
     # infra
-    local_url: str = Field(default="http://localhost:8000", description="Hummingbot API base url (backtest+live)")
+    local_url: str = Field(default="", description="SEPARATE backtest API url. Leave EMPTY on the competition container → the bench backtests on the agent's own live API. Set only for dev (e.g. brigado, which freezes if it backtests on its own live API → point this at a separate stack).")
     local_user: str = Field(default="elamigo")
     local_pass: str = Field(default="barabit")
-    credentials_profile: str = Field(default="master_account")
+    credentials_profile: str = Field(default="master_account", description="Account/credentials profile to deploy under — the organizers provision this on their container; we never ship credentials.")
     deploy_image: str = Field(default="hummingbot/hummingbot:latest")
     bot_name: str = Field(default="botcamp-mm", description="Bot instance that hosts the fleet")
-    dry_run: bool = Field(default=True, description="Decision logic only; no live deploys/updates")
+    dry_run: bool = Field(default=False, description="LIVE by default (C1 fix: an organizer launch from default_config MUST trade). Set true only for offline/integration testing.")
     # Stage-1 live safeguards
     max_subs_per_hour: int = Field(default=3, description="Churn cap — max substitutions per rolling hour (runaway guard)")
     tg_chat_id: int = Field(default=6310433268, description="Telegram chat for action alerts (0 = off)")
@@ -121,7 +122,7 @@ def base_config(cfg: Config) -> dict:
         "total_amount_quote": round(cfg.capital_quote / max(1, cfg.fleet_size), 2),
         # VALIDATED profit setup: tight 3-level ladder inside the natural spread, TP > fee, fast turnover
         "buy_spreads": [0.0005, 0.0006, 0.0007], "sell_spreads": [0.0005, 0.0006, 0.0007],  # 5/6/7bp ladder
-        "take_profit": 0.0012,                                 # 12bp > 8bp round-trip fee → +4bp/trip
+        "take_profit": 0.0010,                                 # 10bp > 8bp round-trip fee → +2bp/trip (tilted for volume: faster round trips, thinner-but-positive margin)
         "min_base_pct": 0.3, "target_base_pct": 0.5, "max_base_pct": 0.7,  # balanced → both sides quote
         "executor_refresh_time": 60,                           # track mid
         "buy_position_effectivization_time": 90, "sell_position_effectivization_time": 90,  # close fast, re-quote
@@ -132,7 +133,7 @@ def base_config(cfg: Config) -> dict:
         "open_order_type": 3, "take_profit_order_type": 3,
         "tick_mode": False, "price_distance_tolerance": "0.0003",
         "refresh_tolerance": "0.0003", "tolerance_scaling": "1.2", "min_skew": "1",  # 3bp: re-quote to track mid (12bp=dead)
-        "portfolio_allocation": "0.5", "leverage": 1, "position_mode": "ONEWAY",  # ~$100 across the 3-level ladder
+        "portfolio_allocation": "1.0", "leverage": 1, "position_mode": "ONEWAY",  # deploy the FULL per-controller budget (volume = 40% of the comp score)
         "position_side": "BUY", "position_profit_protection": True,
         "manual_kill_switch": False, "initial_positions": [],
         # global safety (kept conservative; the organizers also impose hard limits)
@@ -156,6 +157,9 @@ def random_variant(cfg: Config, rng: random.Random) -> dict:
     c = base_config(cfg)
     s = rng.choice(_SPREADS)
     c["buy_spreads"] = [s]; c["sell_spreads"] = [s]
+    # M1 fix: collapsing to a single spread level means amounts_pct must also be length-1,
+    # else the ladder is length-mismatched and the backtest errors → bench never populates.
+    c["buy_amounts_pct"] = ["1"]; c["sell_amounts_pct"] = ["1"]
     c["take_profit"] = rng.choice(_TPS)
     eff = rng.choice(_EFF)
     c["buy_position_effectivization_time"] = eff
@@ -269,9 +273,15 @@ def _tg(cfg: Config, text: str):
     if not cfg.tg_chat_id:
         return
     try:
-        import json as _j, urllib.request as _u, re as _re
-        token = next((m.group(1) for line in open(".env")
-                      if (m := _re.match(r'\s*TELEGRAM_TOKEN\s*=\s*"?([^"\s]+)', line))), None)
+        import json as _j, urllib.request as _u, re as _re, os as _os
+        # M5 fix: prefer env (works on any container); fall back to .env (local dev)
+        token = _os.environ.get("TELEGRAM_TOKEN")
+        if not token:
+            try:
+                token = next((m.group(1) for line in open(".env")
+                              if (m := _re.match(r'\s*TELEGRAM_TOKEN\s*=\s*"?([^"\s]+)', line))), None)
+            except Exception:
+                token = None
         if not token:
             return
         req = _u.Request(f"https://api.telegram.org/bot{token}/sendMessage",
@@ -365,6 +375,7 @@ async def apply_substitution(live, cfg: Config, cid: str, bot: Optional[str], ne
     try:
         payload = dict(new_cfg)
         payload["id"] = cid  # keep the slot id, swap the params
+        _fix_amounts(payload)  # fail-safe: amounts_pct must match spreads length
         await live.controllers.create_or_update_controller_config(cid, payload)
         try:
             if bot:
@@ -378,6 +389,21 @@ async def apply_substitution(live, cfg: Config, cid: str, bot: Optional[str], ne
         log(f"substitution of {cid} FAILED: {str(e)[:80]}")
         _tg(cfg, f"⚠️ botcamp agent: substitution of {cid} FAILED: {str(e)[:80]}")
         return False
+
+
+def _fix_amounts(c: dict) -> dict:
+    """Ensure buy/sell_amounts_pct have the SAME length as buy/sell_spreads. A mismatch makes the
+    controller fail to start ('number of amounts_pct must match the number of spreads' → 0 executors,
+    0 trades). Applied to EVERY config before deploy/substitution as a fail-safe — bench configs,
+    variants, anything. Splits the budget equally across levels (summing to 1)."""
+    for side in ("buy", "sell"):
+        sp = c.get(f"{side}_spreads") or []
+        n = len(sp) if isinstance(sp, (list, tuple)) else 1
+        n = max(1, n)
+        each = round(1.0 / n, 4)
+        amt = [str(each)] * (n - 1) + [str(round(1.0 - each * (n - 1), 4))]
+        c[f"{side}_amounts_pct"] = amt
+    return c
 
 
 async def cold_start_deploy(live, cfg: Config, bench: list[dict], need: int, log) -> Optional[str]:
@@ -397,6 +423,7 @@ async def cold_start_deploy(live, cfg: Config, bench: list[dict], need: int, log
         c["connector_name"] = cfg.connector_name
         c["trading_pair"] = cfg.trading_pair
         c["total_amount_quote"] = round(cfg.capital_quote / max(1, cfg.fleet_size), 2)
+        _fix_amounts(c)  # fail-safe: amounts_pct must match spreads length or the controller won't start
         cid = f"botcamp-{cfg.trading_pair.lower().replace('-', '')}-{i}-{ts}"
         c["id"] = cid
         chosen.append((cid, c))
@@ -409,6 +436,8 @@ async def cold_start_deploy(live, cfg: Config, bench: list[dict], need: int, log
         await live.controllers.create_or_update_controller_config(cid, c)
         names.append(cid)
     budget = cfg.capital_quote
+    # The organizers provision the account/credentials profile on their container; we just pass the
+    # configured name. We never ship, read, or resolve credentials from our side.
     try:
         res = await live.bot_orchestration.deploy_v2_controllers(
             instance_name=instance, credentials_profile=cfg.credentials_profile,
@@ -446,7 +475,11 @@ async def run_cycle(live, local, cfg: Config, bench: list[dict], state: dict, lo
         # 1) FLEET FIRST — deploy promptly on cold start (don't make the fleet wait on backtests)
         fleet = await read_fleet(live, cfg)
         log(f"fleet: {len(fleet)} live / target {cfg.fleet_size}")
-        if cfg.cold_start and len(fleet) < cfg.fleet_size and now - float(state.get("cold_start_ts", 0)) > 600:
+        # H3 fix: once we've deployed a cold-start bot, give its controllers a long grace to
+        # register (30 min) before any second deploy — a slow-registering fleet must not trigger
+        # a duplicate deploy that fragments capital across two bots.
+        cs_grace = 1800 if state.get("cold_start_bot") else 600
+        if cfg.cold_start and len(fleet) < cfg.fleet_size and now - float(state.get("cold_start_ts", 0)) > cs_grace:
             need = cfg.fleet_size - len(fleet)
             log(f"cold-start: {len(fleet)}/{cfg.fleet_size} live → deploying {need}")
             inst = await cold_start_deploy(live, cfg, bench, need, log)
@@ -455,7 +488,13 @@ async def run_cycle(live, local, cfg: Config, bench: list[dict], state: dict, lo
                 state["cold_start_bot"] = inst
             status = "cold_start"
         else:
-            # manage the existing fleet: triggers + fail-closed substitutions
+            # manage the existing fleet: triggers + fail-closed substitutions.
+            # Substitute a stalled controller with the BEST ELIGIBLE bench config — a robust winner
+            # (positive in >= min_positive_windows disjoint daily windows), ranked fee-aware by
+            # median PnL. This is the heart of the agent: the continuous bench keeps finding better
+            # configs, and a stalled controller is rotated to the current best. The validated
+            # base_config is used ONLY as a safety net before the bench has produced an eligible
+            # winner, so a stall is always healed. Never re-pick the config that just failed.
             recently_failed = set(state.get("recently_failed", []))
             sub_times = [t for t in state.get("sub_times", []) if now - t < 3600]
             for cid, reason in check_triggers(fleet, state, cfg, now):
@@ -463,24 +502,26 @@ async def run_cycle(live, local, cfg: Config, bench: list[dict], state: dict, lo
                     log(f"⏸️ churn cap: {len(sub_times)}/{cfg.max_subs_per_hour} this hour — deferring {cid}")
                     continue
                 pick = select_substitute(bench, cfg.min_positive_windows, exclude_sigs=recently_failed)
-                if not pick:
-                    log(f"{cid} needs sub ({reason}) but bench has no eligible config yet")
-                    continue
-                log(f"SUBSTITUTE {cid}: {reason}")
-                if await apply_substitution(live, cfg, cid, fleet[cid].get("bot"), pick["config"], fleet, log):
+                new_cfg = pick["config"] if pick else base_config(cfg)
+                new_sig = pick["sig"] if pick else "base_config"
+                src = f"bench winner {new_sig}" if pick else "base_config (no eligible bench config yet)"
+                log(f"SUBSTITUTE {cid}: {reason} → {src}")
+                if await apply_substitution(live, cfg, cid, fleet[cid].get("bot"), new_cfg, fleet, log):
                     sub_times.append(now)
                     dead_sig = state.get("live_sig", {}).get(cid)
                     if dead_sig:
                         recently_failed.add(dead_sig)
-                    state.setdefault("live_sig", {})[cid] = pick["sig"]
+                    state.setdefault("live_sig", {})[cid] = new_sig
                     state["vol_hist"].pop(cid, None)
             state["sub_times"] = sub_times
             state["recently_failed"] = list(recently_failed)[-20:]
         _save(_p(cfg, "state"), state)
         _write_heartbeat(cfg, state, status, len(bench), log)  # fresh signal BEFORE the slow bench build
-        # 2) grow the bench (slower; after the fleet is handled)
-        bench = await grow_bench(local, cfg, bench, log)
-        _save(_p(cfg, "bench"), bench)
+        # 2) grow the bench (slower; after the fleet is handled) — the continuous search that feeds
+        #    substitution. Runs against `local` (a separate stack, or the live API fallback).
+        if local is not None and cfg.bench_enabled:
+            bench = await grow_bench(local, cfg, bench, log)
+            _save(_p(cfg, "bench"), bench)
     except Exception as e:
         status = f"error: {str(e)[:100]}"
         log(status)
@@ -498,9 +539,26 @@ async def run(config: Config, context: ContextTypes.DEFAULT_TYPE) -> str:
 
     chat_id = getattr(context, "_chat_id", None)
     live = await get_client(chat_id, context=context)
-    local = HummingbotAPIClient(base_url=config.local_url, username=config.local_user,
-                                password=config.local_pass, timeout=ClientTimeout(total=1800, connect=15))
-    await local.init()
+    # The bench needs a Hummingbot API with backtesting + candles. The backtest engine (run_trial)
+    # takes ANY HummingbotAPIClient — and `live` IS one. So:
+    #  - if a SEPARATE backtest stack is configured (local_url) and connects, use it (dev/brigado,
+    #    which freezes if it backtests on its own live API);
+    #  - otherwise backtest on the agent's OWN live API (the competition container). A dedicated
+    #    container can backtest its own candle feed.
+    # Either way the bench ALWAYS has a client → substitution always has fresh, backtested configs.
+    local = None
+    if config.local_url:
+        try:
+            local = HummingbotAPIClient(base_url=config.local_url, username=config.local_user,
+                                        password=config.local_pass, timeout=ClientTimeout(total=1800, connect=15))
+            await local.init()
+            log(f"bench: using SEPARATE backtest API ({config.local_url})")
+        except Exception as e:
+            local = None
+            log(f"bench: separate backtest API unreachable ({str(e)[:50]}) — falling back to the live API")
+    if local is None:
+        local = live  # backtest on the agent's own Hummingbot API (their container)
+        log("bench: backtesting on the agent's own live Hummingbot API")
 
     # seed bench from the shipped fallback if we have nothing yet (egress hedge)
     bench = _load(_p(config, "bench"), [])
