@@ -1,0 +1,736 @@
+{
+  "BTC-BRL": {
+    "connector": "binance",
+    "credentials_profile": "master_account",
+    "controllers": 12,
+    "allocation": 0.0833,
+    "base_profile": "inherit",
+    "_comment_profile": "inherit the live working profile; the manager only drives tilt + substitution, never rewrites proven spreads/TP/eff",
+    "convergence": {
+      "_comment": "EXPLOIT target = the LIVE winner's config (ranked by capital-normalized yield). NEVER a backtest winner (backtest != live).",
+      "winner_source": "live_normalized_yield",
+      "rank_window_hours": 12
+    },
+    "substitution": {
+      "_comment": "persistent losers get their CONFIG replaced; patience window + churn cap so we don't churn on noise",
+      "trigger": "normalized_yield_below",
+      "yield_threshold": 0.0,
+      "patience_hours": 12,
+      "max_subs_per_hour": 2,
+      "replacement_pool": {
+        "exploit_live_winner_ratio": 0.8,
+        "_comment_exploit": "most replacements -> the LIVE winner's config = the fleet converges (at config level) to what works live",
+        "explore_backtest_candidate_ratio": 0.2,
+        "_comment_explore": "~a couple of slots -> a fresh backtest candidate; must PROVE OUT LIVE before it's trusted as an exploit target"
+      }
+    },
+    "bench": {
+      "_comment": "continuous chunked backtest on brigado (read-only) feeds the EXPLORE pool only",
+      "source": "brigado_chunked_backtest",
+      "status": "wired_in_step7"
+    },
+    "risk": {
+      "_comment": "3 tiers, softest -> hardest: substitution  <  brake  <  global_kill",
+      "brake": {
+        "_comment": "gradual de-risk: LOWER target_base_pct on drawdown/drift. NEVER market-sells (that is selling the bottom).",
+        "enabled": true,
+        "floor_tgtB": 0.5,
+        "never_sell": true
+      },
+      "global_kill": {
+        "_comment": "catastrophe backstop ONLY: max cumulative fleet loss -> HALT new quoting + ALERT you. Does NOT dump inventory.",
+        "max_loss_brl": 6000,
+        "_comment_tune": "working capital ~10,000 BRL (alloc 0.083 x12); kill at -6,000 = ~60% (catastrophe-only; brake handles normal drawdowns). CONFIRM.",
+        "action": "halt_and_alert",
+        "no_dump": true
+      }
+    },
+    "cold_start": [
+      {
+        "source": "VOL",
+        "spread_bp": 0.5,
+        "tp_bp": 1.0,
+        "eff": 300,
+        "config": {
+          "buy_amounts_pct": [
+            "1"
+          ],
+          "buy_cooldown_time": 10,
+          "buy_position_effectivization_time": 300,
+          "buy_spreads": [
+            5e-05
+          ],
+          "connector_name": "binance",
+          "controller_name": "pmm_mister",
+          "controller_type": "generic",
+          "executor_refresh_time": 60,
+          "global_pnl_reference": "position",
+          "global_sl_activation_from": "target_base",
+          "global_sl_enabled": true,
+          "global_stop_loss": "0.01",
+          "global_take_profit": "0.005",
+          "global_tp_activation_from": "min_base",
+          "global_tp_enabled": true,
+          "id": "btcbrl-cs0-vol",
+          "initial_positions": [],
+          "leverage": 1,
+          "manual_kill_switch": false,
+          "max_active_executors_by_level": 20,
+          "max_base_pct": 1,
+          "min_base_pct": "0.3",
+          "min_skew": "1",
+          "open_order_type": 3,
+          "portfolio_allocation": 0.0833,
+          "position_mode": "ONEWAY",
+          "position_profit_protection": true,
+          "position_side": "BUY",
+          "price_distance_tolerance": "0.0003",
+          "refresh_tolerance": "0.0012",
+          "sell_amounts_pct": [
+            "1"
+          ],
+          "sell_cooldown_time": 10,
+          "sell_position_effectivization_time": 300,
+          "sell_spreads": [
+            5e-05
+          ],
+          "take_profit": 0.0001,
+          "take_profit_order_type": 3,
+          "target_base_pct": 0.65,
+          "tick_mode": false,
+          "tolerance_scaling": "1.2",
+          "total_amount_quote": 10000.0,
+          "trading_pair": "BTC-BRL"
+        }
+      },
+      {
+        "source": "VOL",
+        "spread_bp": 0.5,
+        "tp_bp": 1.0,
+        "eff": 150,
+        "config": {
+          "buy_amounts_pct": [
+            "1"
+          ],
+          "buy_cooldown_time": 10,
+          "buy_position_effectivization_time": 150,
+          "buy_spreads": [
+            5e-05
+          ],
+          "connector_name": "binance",
+          "controller_name": "pmm_mister",
+          "controller_type": "generic",
+          "executor_refresh_time": 60,
+          "global_pnl_reference": "position",
+          "global_sl_activation_from": "target_base",
+          "global_sl_enabled": true,
+          "global_stop_loss": "0.01",
+          "global_take_profit": "0.005",
+          "global_tp_activation_from": "min_base",
+          "global_tp_enabled": true,
+          "id": "btcbrl-cs1-vol",
+          "initial_positions": [],
+          "leverage": 1,
+          "manual_kill_switch": false,
+          "max_active_executors_by_level": 20,
+          "max_base_pct": 1,
+          "min_base_pct": "0.3",
+          "min_skew": "1",
+          "open_order_type": 3,
+          "portfolio_allocation": 0.0833,
+          "position_mode": "ONEWAY",
+          "position_profit_protection": true,
+          "position_side": "BUY",
+          "price_distance_tolerance": "0.0003",
+          "refresh_tolerance": "0.0012",
+          "sell_amounts_pct": [
+            "1"
+          ],
+          "sell_cooldown_time": 10,
+          "sell_position_effectivization_time": 150,
+          "sell_spreads": [
+            5e-05
+          ],
+          "take_profit": 0.0001,
+          "take_profit_order_type": 3,
+          "target_base_pct": 0.65,
+          "tick_mode": false,
+          "tolerance_scaling": "1.2",
+          "total_amount_quote": 10000.0,
+          "trading_pair": "BTC-BRL"
+        }
+      },
+      {
+        "source": "VOL",
+        "spread_bp": 0.5,
+        "tp_bp": 2.0,
+        "eff": 300,
+        "config": {
+          "buy_amounts_pct": [
+            "1"
+          ],
+          "buy_cooldown_time": 10,
+          "buy_position_effectivization_time": 300,
+          "buy_spreads": [
+            5e-05
+          ],
+          "connector_name": "binance",
+          "controller_name": "pmm_mister",
+          "controller_type": "generic",
+          "executor_refresh_time": 60,
+          "global_pnl_reference": "position",
+          "global_sl_activation_from": "target_base",
+          "global_sl_enabled": true,
+          "global_stop_loss": "0.01",
+          "global_take_profit": "0.005",
+          "global_tp_activation_from": "min_base",
+          "global_tp_enabled": true,
+          "id": "btcbrl-cs2-vol",
+          "initial_positions": [],
+          "leverage": 1,
+          "manual_kill_switch": false,
+          "max_active_executors_by_level": 20,
+          "max_base_pct": 1,
+          "min_base_pct": "0.3",
+          "min_skew": "1",
+          "open_order_type": 3,
+          "portfolio_allocation": 0.0833,
+          "position_mode": "ONEWAY",
+          "position_profit_protection": true,
+          "position_side": "BUY",
+          "price_distance_tolerance": "0.0003",
+          "refresh_tolerance": "0.0012",
+          "sell_amounts_pct": [
+            "1"
+          ],
+          "sell_cooldown_time": 10,
+          "sell_position_effectivization_time": 300,
+          "sell_spreads": [
+            5e-05
+          ],
+          "take_profit": 0.0002,
+          "take_profit_order_type": 3,
+          "target_base_pct": 0.65,
+          "tick_mode": false,
+          "tolerance_scaling": "1.2",
+          "total_amount_quote": 10000.0,
+          "trading_pair": "BTC-BRL"
+        }
+      },
+      {
+        "source": "VOL",
+        "spread_bp": 0.5,
+        "tp_bp": 1.5,
+        "eff": 300,
+        "config": {
+          "buy_amounts_pct": [
+            "1"
+          ],
+          "buy_cooldown_time": 10,
+          "buy_position_effectivization_time": 300,
+          "buy_spreads": [
+            5e-05
+          ],
+          "connector_name": "binance",
+          "controller_name": "pmm_mister",
+          "controller_type": "generic",
+          "executor_refresh_time": 60,
+          "global_pnl_reference": "position",
+          "global_sl_activation_from": "target_base",
+          "global_sl_enabled": true,
+          "global_stop_loss": "0.01",
+          "global_take_profit": "0.005",
+          "global_tp_activation_from": "min_base",
+          "global_tp_enabled": true,
+          "id": "btcbrl-cs3-vol",
+          "initial_positions": [],
+          "leverage": 1,
+          "manual_kill_switch": false,
+          "max_active_executors_by_level": 20,
+          "max_base_pct": 1,
+          "min_base_pct": "0.3",
+          "min_skew": "1",
+          "open_order_type": 3,
+          "portfolio_allocation": 0.0833,
+          "position_mode": "ONEWAY",
+          "position_profit_protection": true,
+          "position_side": "BUY",
+          "price_distance_tolerance": "0.0003",
+          "refresh_tolerance": "0.0012",
+          "sell_amounts_pct": [
+            "1"
+          ],
+          "sell_cooldown_time": 10,
+          "sell_position_effectivization_time": 300,
+          "sell_spreads": [
+            5e-05
+          ],
+          "take_profit": 0.00015,
+          "take_profit_order_type": 3,
+          "target_base_pct": 0.65,
+          "tick_mode": false,
+          "tolerance_scaling": "1.2",
+          "total_amount_quote": 10000.0,
+          "trading_pair": "BTC-BRL"
+        }
+      },
+      {
+        "source": "VOL",
+        "spread_bp": 0.5,
+        "tp_bp": 2.0,
+        "eff": 150,
+        "config": {
+          "buy_amounts_pct": [
+            "1"
+          ],
+          "buy_cooldown_time": 10,
+          "buy_position_effectivization_time": 150,
+          "buy_spreads": [
+            5e-05
+          ],
+          "connector_name": "binance",
+          "controller_name": "pmm_mister",
+          "controller_type": "generic",
+          "executor_refresh_time": 60,
+          "global_pnl_reference": "position",
+          "global_sl_activation_from": "target_base",
+          "global_sl_enabled": true,
+          "global_stop_loss": "0.01",
+          "global_take_profit": "0.005",
+          "global_tp_activation_from": "min_base",
+          "global_tp_enabled": true,
+          "id": "btcbrl-cs4-vol",
+          "initial_positions": [],
+          "leverage": 1,
+          "manual_kill_switch": false,
+          "max_active_executors_by_level": 20,
+          "max_base_pct": 1,
+          "min_base_pct": "0.3",
+          "min_skew": "1",
+          "open_order_type": 3,
+          "portfolio_allocation": 0.0833,
+          "position_mode": "ONEWAY",
+          "position_profit_protection": true,
+          "position_side": "BUY",
+          "price_distance_tolerance": "0.0003",
+          "refresh_tolerance": "0.0012",
+          "sell_amounts_pct": [
+            "1"
+          ],
+          "sell_cooldown_time": 10,
+          "sell_position_effectivization_time": 150,
+          "sell_spreads": [
+            5e-05
+          ],
+          "take_profit": 0.0002,
+          "take_profit_order_type": 3,
+          "target_base_pct": 0.65,
+          "tick_mode": false,
+          "tolerance_scaling": "1.2",
+          "total_amount_quote": 10000.0,
+          "trading_pair": "BTC-BRL"
+        }
+      },
+      {
+        "source": "VOL",
+        "spread_bp": 0.5,
+        "tp_bp": 1.5,
+        "eff": 150,
+        "config": {
+          "buy_amounts_pct": [
+            "1"
+          ],
+          "buy_cooldown_time": 10,
+          "buy_position_effectivization_time": 150,
+          "buy_spreads": [
+            5e-05
+          ],
+          "connector_name": "binance",
+          "controller_name": "pmm_mister",
+          "controller_type": "generic",
+          "executor_refresh_time": 60,
+          "global_pnl_reference": "position",
+          "global_sl_activation_from": "target_base",
+          "global_sl_enabled": true,
+          "global_stop_loss": "0.01",
+          "global_take_profit": "0.005",
+          "global_tp_activation_from": "min_base",
+          "global_tp_enabled": true,
+          "id": "btcbrl-cs5-vol",
+          "initial_positions": [],
+          "leverage": 1,
+          "manual_kill_switch": false,
+          "max_active_executors_by_level": 20,
+          "max_base_pct": 1,
+          "min_base_pct": "0.3",
+          "min_skew": "1",
+          "open_order_type": 3,
+          "portfolio_allocation": 0.0833,
+          "position_mode": "ONEWAY",
+          "position_profit_protection": true,
+          "position_side": "BUY",
+          "price_distance_tolerance": "0.0003",
+          "refresh_tolerance": "0.0012",
+          "sell_amounts_pct": [
+            "1"
+          ],
+          "sell_cooldown_time": 10,
+          "sell_position_effectivization_time": 150,
+          "sell_spreads": [
+            5e-05
+          ],
+          "take_profit": 0.00015,
+          "take_profit_order_type": 3,
+          "target_base_pct": 0.65,
+          "tick_mode": false,
+          "tolerance_scaling": "1.2",
+          "total_amount_quote": 10000.0,
+          "trading_pair": "BTC-BRL"
+        }
+      },
+      {
+        "source": "PNL",
+        "spread_bp": 3.0,
+        "tp_bp": 2.0,
+        "eff": 300,
+        "config": {
+          "buy_amounts_pct": [
+            "1"
+          ],
+          "buy_cooldown_time": 10,
+          "buy_position_effectivization_time": 300,
+          "buy_spreads": [
+            0.0003
+          ],
+          "connector_name": "binance",
+          "controller_name": "pmm_mister",
+          "controller_type": "generic",
+          "executor_refresh_time": 60,
+          "global_pnl_reference": "position",
+          "global_sl_activation_from": "target_base",
+          "global_sl_enabled": true,
+          "global_stop_loss": "0.01",
+          "global_take_profit": "0.005",
+          "global_tp_activation_from": "min_base",
+          "global_tp_enabled": true,
+          "id": "btcbrl-cs6-pnl",
+          "initial_positions": [],
+          "leverage": 1,
+          "manual_kill_switch": false,
+          "max_active_executors_by_level": 20,
+          "max_base_pct": 1,
+          "min_base_pct": "0.3",
+          "min_skew": "1",
+          "open_order_type": 3,
+          "portfolio_allocation": 0.0833,
+          "position_mode": "ONEWAY",
+          "position_profit_protection": true,
+          "position_side": "BUY",
+          "price_distance_tolerance": "0.0003",
+          "refresh_tolerance": "0.0012",
+          "sell_amounts_pct": [
+            "1"
+          ],
+          "sell_cooldown_time": 10,
+          "sell_position_effectivization_time": 300,
+          "sell_spreads": [
+            0.0003
+          ],
+          "take_profit": 0.0002,
+          "take_profit_order_type": 3,
+          "target_base_pct": 0.65,
+          "tick_mode": false,
+          "tolerance_scaling": "1.2",
+          "total_amount_quote": 10000.0,
+          "trading_pair": "BTC-BRL"
+        }
+      },
+      {
+        "source": "PNL",
+        "spread_bp": 3.0,
+        "tp_bp": 1.5,
+        "eff": 300,
+        "config": {
+          "buy_amounts_pct": [
+            "1"
+          ],
+          "buy_cooldown_time": 10,
+          "buy_position_effectivization_time": 300,
+          "buy_spreads": [
+            0.0003
+          ],
+          "connector_name": "binance",
+          "controller_name": "pmm_mister",
+          "controller_type": "generic",
+          "executor_refresh_time": 60,
+          "global_pnl_reference": "position",
+          "global_sl_activation_from": "target_base",
+          "global_sl_enabled": true,
+          "global_stop_loss": "0.01",
+          "global_take_profit": "0.005",
+          "global_tp_activation_from": "min_base",
+          "global_tp_enabled": true,
+          "id": "btcbrl-cs7-pnl",
+          "initial_positions": [],
+          "leverage": 1,
+          "manual_kill_switch": false,
+          "max_active_executors_by_level": 20,
+          "max_base_pct": 1,
+          "min_base_pct": "0.3",
+          "min_skew": "1",
+          "open_order_type": 3,
+          "portfolio_allocation": 0.0833,
+          "position_mode": "ONEWAY",
+          "position_profit_protection": true,
+          "position_side": "BUY",
+          "price_distance_tolerance": "0.0003",
+          "refresh_tolerance": "0.0012",
+          "sell_amounts_pct": [
+            "1"
+          ],
+          "sell_cooldown_time": 10,
+          "sell_position_effectivization_time": 300,
+          "sell_spreads": [
+            0.0003
+          ],
+          "take_profit": 0.00015,
+          "take_profit_order_type": 3,
+          "target_base_pct": 0.65,
+          "tick_mode": false,
+          "tolerance_scaling": "1.2",
+          "total_amount_quote": 10000.0,
+          "trading_pair": "BTC-BRL"
+        }
+      },
+      {
+        "source": "PNL",
+        "spread_bp": 3.0,
+        "tp_bp": 1.0,
+        "eff": 900,
+        "config": {
+          "buy_amounts_pct": [
+            "1"
+          ],
+          "buy_cooldown_time": 10,
+          "buy_position_effectivization_time": 900,
+          "buy_spreads": [
+            0.0003
+          ],
+          "connector_name": "binance",
+          "controller_name": "pmm_mister",
+          "controller_type": "generic",
+          "executor_refresh_time": 60,
+          "global_pnl_reference": "position",
+          "global_sl_activation_from": "target_base",
+          "global_sl_enabled": true,
+          "global_stop_loss": "0.01",
+          "global_take_profit": "0.005",
+          "global_tp_activation_from": "min_base",
+          "global_tp_enabled": true,
+          "id": "btcbrl-cs8-pnl",
+          "initial_positions": [],
+          "leverage": 1,
+          "manual_kill_switch": false,
+          "max_active_executors_by_level": 20,
+          "max_base_pct": 1,
+          "min_base_pct": "0.3",
+          "min_skew": "1",
+          "open_order_type": 3,
+          "portfolio_allocation": 0.0833,
+          "position_mode": "ONEWAY",
+          "position_profit_protection": true,
+          "position_side": "BUY",
+          "price_distance_tolerance": "0.0003",
+          "refresh_tolerance": "0.0012",
+          "sell_amounts_pct": [
+            "1"
+          ],
+          "sell_cooldown_time": 10,
+          "sell_position_effectivization_time": 900,
+          "sell_spreads": [
+            0.0003
+          ],
+          "take_profit": 0.0001,
+          "take_profit_order_type": 3,
+          "target_base_pct": 0.65,
+          "tick_mode": false,
+          "tolerance_scaling": "1.2",
+          "total_amount_quote": 10000.0,
+          "trading_pair": "BTC-BRL"
+        }
+      },
+      {
+        "source": "PNL",
+        "spread_bp": 3.0,
+        "tp_bp": 2.0,
+        "eff": 900,
+        "config": {
+          "buy_amounts_pct": [
+            "1"
+          ],
+          "buy_cooldown_time": 10,
+          "buy_position_effectivization_time": 900,
+          "buy_spreads": [
+            0.0003
+          ],
+          "connector_name": "binance",
+          "controller_name": "pmm_mister",
+          "controller_type": "generic",
+          "executor_refresh_time": 60,
+          "global_pnl_reference": "position",
+          "global_sl_activation_from": "target_base",
+          "global_sl_enabled": true,
+          "global_stop_loss": "0.01",
+          "global_take_profit": "0.005",
+          "global_tp_activation_from": "min_base",
+          "global_tp_enabled": true,
+          "id": "btcbrl-cs9-pnl",
+          "initial_positions": [],
+          "leverage": 1,
+          "manual_kill_switch": false,
+          "max_active_executors_by_level": 20,
+          "max_base_pct": 1,
+          "min_base_pct": "0.3",
+          "min_skew": "1",
+          "open_order_type": 3,
+          "portfolio_allocation": 0.0833,
+          "position_mode": "ONEWAY",
+          "position_profit_protection": true,
+          "position_side": "BUY",
+          "price_distance_tolerance": "0.0003",
+          "refresh_tolerance": "0.0012",
+          "sell_amounts_pct": [
+            "1"
+          ],
+          "sell_cooldown_time": 10,
+          "sell_position_effectivization_time": 900,
+          "sell_spreads": [
+            0.0003
+          ],
+          "take_profit": 0.0002,
+          "take_profit_order_type": 3,
+          "target_base_pct": 0.65,
+          "tick_mode": false,
+          "tolerance_scaling": "1.2",
+          "total_amount_quote": 10000.0,
+          "trading_pair": "BTC-BRL"
+        }
+      },
+      {
+        "source": "PNL",
+        "spread_bp": 3.0,
+        "tp_bp": 2.0,
+        "eff": 600,
+        "config": {
+          "buy_amounts_pct": [
+            "1"
+          ],
+          "buy_cooldown_time": 10,
+          "buy_position_effectivization_time": 600,
+          "buy_spreads": [
+            0.0003
+          ],
+          "connector_name": "binance",
+          "controller_name": "pmm_mister",
+          "controller_type": "generic",
+          "executor_refresh_time": 60,
+          "global_pnl_reference": "position",
+          "global_sl_activation_from": "target_base",
+          "global_sl_enabled": true,
+          "global_stop_loss": "0.01",
+          "global_take_profit": "0.005",
+          "global_tp_activation_from": "min_base",
+          "global_tp_enabled": true,
+          "id": "btcbrl-cs10-pnl",
+          "initial_positions": [],
+          "leverage": 1,
+          "manual_kill_switch": false,
+          "max_active_executors_by_level": 20,
+          "max_base_pct": 1,
+          "min_base_pct": "0.3",
+          "min_skew": "1",
+          "open_order_type": 3,
+          "portfolio_allocation": 0.0833,
+          "position_mode": "ONEWAY",
+          "position_profit_protection": true,
+          "position_side": "BUY",
+          "price_distance_tolerance": "0.0003",
+          "refresh_tolerance": "0.0012",
+          "sell_amounts_pct": [
+            "1"
+          ],
+          "sell_cooldown_time": 10,
+          "sell_position_effectivization_time": 600,
+          "sell_spreads": [
+            0.0003
+          ],
+          "take_profit": 0.0002,
+          "take_profit_order_type": 3,
+          "target_base_pct": 0.65,
+          "tick_mode": false,
+          "tolerance_scaling": "1.2",
+          "total_amount_quote": 10000.0,
+          "trading_pair": "BTC-BRL"
+        }
+      },
+      {
+        "source": "PNL",
+        "spread_bp": 3.0,
+        "tp_bp": 1.0,
+        "eff": 300,
+        "config": {
+          "buy_amounts_pct": [
+            "1"
+          ],
+          "buy_cooldown_time": 10,
+          "buy_position_effectivization_time": 300,
+          "buy_spreads": [
+            0.0003
+          ],
+          "connector_name": "binance",
+          "controller_name": "pmm_mister",
+          "controller_type": "generic",
+          "executor_refresh_time": 60,
+          "global_pnl_reference": "position",
+          "global_sl_activation_from": "target_base",
+          "global_sl_enabled": true,
+          "global_stop_loss": "0.01",
+          "global_take_profit": "0.005",
+          "global_tp_activation_from": "min_base",
+          "global_tp_enabled": true,
+          "id": "btcbrl-cs11-pnl",
+          "initial_positions": [],
+          "leverage": 1,
+          "manual_kill_switch": false,
+          "max_active_executors_by_level": 20,
+          "max_base_pct": 1,
+          "min_base_pct": "0.3",
+          "min_skew": "1",
+          "open_order_type": 3,
+          "portfolio_allocation": 0.0833,
+          "position_mode": "ONEWAY",
+          "position_profit_protection": true,
+          "position_side": "BUY",
+          "price_distance_tolerance": "0.0003",
+          "refresh_tolerance": "0.0012",
+          "sell_amounts_pct": [
+            "1"
+          ],
+          "sell_cooldown_time": 10,
+          "sell_position_effectivization_time": 300,
+          "sell_spreads": [
+            0.0003
+          ],
+          "take_profit": 0.0001,
+          "take_profit_order_type": 3,
+          "target_base_pct": 0.65,
+          "tick_mode": false,
+          "tolerance_scaling": "1.2",
+          "total_amount_quote": 10000.0,
+          "trading_pair": "BTC-BRL"
+        }
+      }
+    ],
+    "_comment_cold_start": "12 relaunch controllers: top-6 by backtest volume + top-6 by backtest PnL (tgtB fixed 0.65). Deployed on GO."
+  }
+}
