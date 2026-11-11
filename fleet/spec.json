@@ -1,0 +1,53 @@
+{
+  "BTC-BRL": {
+    "connector": "binance",
+    "credentials_profile": "master_account",
+    "controllers": 12,
+    "allocation": "inherit",
+    "base_profile": "inherit",
+    "_comment_profile": "inherit the live working profile; the manager only drives tilt + substitution, never rewrites proven spreads/TP/eff",
+
+    "convergence": {
+      "_comment": "EXPLOIT target = the LIVE winner's config (ranked by capital-normalized yield). NEVER a backtest winner (backtest != live).",
+      "winner_source": "live_normalized_yield",
+      "rank_window_hours": 12
+    },
+
+    "substitution": {
+      "_comment": "persistent losers get their CONFIG replaced; patience window + churn cap so we don't churn on noise",
+      "trigger": "normalized_yield_below",
+      "yield_threshold": 0.0,
+      "patience_hours": 12,
+      "max_subs_per_hour": 2,
+      "replacement_pool": {
+        "exploit_live_winner_ratio": 0.8,
+        "_comment_exploit": "most replacements -> the LIVE winner's config = the fleet converges (at config level) to what works live",
+        "explore_backtest_candidate_ratio": 0.2,
+        "_comment_explore": "~a couple of slots -> a fresh backtest candidate; must PROVE OUT LIVE before it's trusted as an exploit target"
+      }
+    },
+
+    "bench": {
+      "_comment": "continuous chunked backtest on brigado (read-only) feeds the EXPLORE pool only",
+      "source": "brigado_chunked_backtest",
+      "status": "wired_in_step7"
+    },
+
+    "risk": {
+      "_comment": "3 tiers, softest -> hardest: substitution  <  brake  <  global_kill",
+      "brake": {
+        "_comment": "gradual de-risk: LOWER target_base_pct on drawdown/drift. NEVER market-sells (that is selling the bottom).",
+        "enabled": true,
+        "floor_tgtB": 0.50,
+        "never_sell": true
+      },
+      "global_kill": {
+        "_comment": "catastrophe backstop ONLY: max cumulative fleet loss -> HALT new quoting + ALERT you. Does NOT dump inventory.",
+        "max_loss_brl": 6000,
+        "_comment_tune": "SET your maximum tolerable fleet loss in BRL. null = disabled until you set it.",
+        "action": "halt_and_alert",
+        "no_dump": true
+      }
+    }
+  }
+}
