@@ -10,7 +10,7 @@ and must be chosen live, not from backtest. So tilt is held fixed here and is NO
 (sweeping it would produce identical rows). This sweep ranks the microstructure params only.
 """
 import sys, os, json, time, urllib.request, traceback
-sys.path.insert(0, "/Users/blaspalmisciano/condor"); os.chdir("/Users/blaspalmisciano/condor")
+_R = os.path.dirname(os.path.dirname(os.path.abspath(__file__))); sys.path.insert(0, _R); os.chdir(_R)
 from routines.gate_backtest import simulate, score_over_windows
 
 RESULTS="data/sc_sweep_results.json"; REPORT="reports/btcbrl_backtest_proposal.html"; LOG="data/sc_sweep.log"
