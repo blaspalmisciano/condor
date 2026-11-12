@@ -1,0 +1,16 @@
+[Unit]
+Description=Condor fleet-manager (btcbrl) routine host
+After=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=/root/condor-fleet
+EnvironmentFile=/root/condor-fleet/.env
+ExecStart=/root/condor/.venv/bin/python main.py
+Restart=always
+RestartSec=10
+StandardOutput=append:/root/condor-fleet/condor.systemd.log
+StandardError=append:/root/condor-fleet/condor.systemd.log
+
+[Install]
+WantedBy=multi-user.target
