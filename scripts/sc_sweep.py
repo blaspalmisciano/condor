@@ -60,6 +60,8 @@ def build_grid(base):
                 c["take_profit"]=round(tp/1e4,8)
                 c["buy_position_effectivization_time"]=eff; c["sell_position_effectivization_time"]=eff
                 c["target_base_pct"]=FIXED_TGTB
+                c["global_sl_enabled"]=False; c["global_tp_enabled"]=False; c["position_profit_protection"]=False
+                c["buy_amounts_pct"]=["1.0"]; c["sell_amounts_pct"]=["1.0"]
                 out.append({"spread_bp":sp,"tp_bp":tp,"eff":eff,"cfg":c})
     return out
 

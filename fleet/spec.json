@@ -53,7 +53,7 @@
         "eff": 300,
         "config": {
           "buy_amounts_pct": [
-            "1"
+            "1.0"
           ],
           "buy_cooldown_time": 10,
           "buy_position_effectivization_time": 300,
@@ -66,11 +66,11 @@
           "executor_refresh_time": 60,
           "global_pnl_reference": "position",
           "global_sl_activation_from": "target_base",
-          "global_sl_enabled": true,
+          "global_sl_enabled": false,
           "global_stop_loss": "0.01",
           "global_take_profit": "0.005",
           "global_tp_activation_from": "min_base",
-          "global_tp_enabled": true,
+          "global_tp_enabled": false,
           "id": "btcbrl-cs0-vol",
           "initial_positions": [],
           "leverage": 1,
@@ -82,12 +82,12 @@
           "open_order_type": 3,
           "portfolio_allocation": 0.0833,
           "position_mode": "ONEWAY",
-          "position_profit_protection": true,
+          "position_profit_protection": false,
           "position_side": "BUY",
           "price_distance_tolerance": "0.0003",
           "refresh_tolerance": "0.0012",
           "sell_amounts_pct": [
-            "1"
+            "1.0"
           ],
           "sell_cooldown_time": 10,
           "sell_position_effectivization_time": 300,
@@ -110,7 +110,7 @@
         "eff": 150,
         "config": {
           "buy_amounts_pct": [
-            "1"
+            "1.0"
           ],
           "buy_cooldown_time": 10,
           "buy_position_effectivization_time": 150,
@@ -123,11 +123,11 @@
           "executor_refresh_time": 60,
           "global_pnl_reference": "position",
           "global_sl_activation_from": "target_base",
-          "global_sl_enabled": true,
+          "global_sl_enabled": false,
           "global_stop_loss": "0.01",
           "global_take_profit": "0.005",
           "global_tp_activation_from": "min_base",
-          "global_tp_enabled": true,
+          "global_tp_enabled": false,
           "id": "btcbrl-cs1-vol",
           "initial_positions": [],
           "leverage": 1,
@@ -139,12 +139,12 @@
           "open_order_type": 3,
           "portfolio_allocation": 0.0833,
           "position_mode": "ONEWAY",
-          "position_profit_protection": true,
+          "position_profit_protection": false,
           "position_side": "BUY",
           "price_distance_tolerance": "0.0003",
           "refresh_tolerance": "0.0012",
           "sell_amounts_pct": [
-            "1"
+            "1.0"
           ],
           "sell_cooldown_time": 10,
           "sell_position_effectivization_time": 150,
@@ -167,7 +167,7 @@
         "eff": 300,
         "config": {
           "buy_amounts_pct": [
-            "1"
+            "1.0"
           ],
           "buy_cooldown_time": 10,
           "buy_position_effectivization_time": 300,
@@ -180,11 +180,11 @@
           "executor_refresh_time": 60,
           "global_pnl_reference": "position",
           "global_sl_activation_from": "target_base",
-          "global_sl_enabled": true,
+          "global_sl_enabled": false,
           "global_stop_loss": "0.01",
           "global_take_profit": "0.005",
           "global_tp_activation_from": "min_base",
-          "global_tp_enabled": true,
+          "global_tp_enabled": false,
           "id": "btcbrl-cs2-vol",
           "initial_positions": [],
           "leverage": 1,
@@ -196,12 +196,12 @@
           "open_order_type": 3,
           "portfolio_allocation": 0.0833,
           "position_mode": "ONEWAY",
-          "position_profit_protection": true,
+          "position_profit_protection": false,
           "position_side": "BUY",
           "price_distance_tolerance": "0.0003",
           "refresh_tolerance": "0.0012",
           "sell_amounts_pct": [
-            "1"
+            "1.0"
           ],
           "sell_cooldown_time": 10,
           "sell_position_effectivization_time": 300,
@@ -224,7 +224,7 @@
         "eff": 300,
         "config": {
           "buy_amounts_pct": [
-            "1"
+            "1.0"
           ],
           "buy_cooldown_time": 10,
           "buy_position_effectivization_time": 300,
@@ -237,11 +237,11 @@
           "executor_refresh_time": 60,
           "global_pnl_reference": "position",
           "global_sl_activation_from": "target_base",
-          "global_sl_enabled": true,
+          "global_sl_enabled": false,
           "global_stop_loss": "0.01",
           "global_take_profit": "0.005",
           "global_tp_activation_from": "min_base",
-          "global_tp_enabled": true,
+          "global_tp_enabled": false,
           "id": "btcbrl-cs3-vol",
           "initial_positions": [],
           "leverage": 1,
@@ -253,12 +253,12 @@
           "open_order_type": 3,
           "portfolio_allocation": 0.0833,
           "position_mode": "ONEWAY",
-          "position_profit_protection": true,
+          "position_profit_protection": false,
           "position_side": "BUY",
           "price_distance_tolerance": "0.0003",
           "refresh_tolerance": "0.0012",
           "sell_amounts_pct": [
-            "1"
+            "1.0"
           ],
           "sell_cooldown_time": 10,
           "sell_position_effectivization_time": 300,
@@ -281,7 +281,7 @@
         "eff": 150,
         "config": {
           "buy_amounts_pct": [
-            "1"
+            "1.0"
           ],
           "buy_cooldown_time": 10,
           "buy_position_effectivization_time": 150,
@@ -294,11 +294,11 @@
           "executor_refresh_time": 60,
           "global_pnl_reference": "position",
           "global_sl_activation_from": "target_base",
-          "global_sl_enabled": true,
+          "global_sl_enabled": false,
           "global_stop_loss": "0.01",
           "global_take_profit": "0.005",
           "global_tp_activation_from": "min_base",
-          "global_tp_enabled": true,
+          "global_tp_enabled": false,
           "id": "btcbrl-cs4-vol",
           "initial_positions": [],
           "leverage": 1,
@@ -310,12 +310,12 @@
           "open_order_type": 3,
           "portfolio_allocation": 0.0833,
           "position_mode": "ONEWAY",
-          "position_profit_protection": true,
+          "position_profit_protection": false,
           "position_side": "BUY",
           "price_distance_tolerance": "0.0003",
           "refresh_tolerance": "0.0012",
           "sell_amounts_pct": [
-            "1"
+            "1.0"
           ],
           "sell_cooldown_time": 10,
           "sell_position_effectivization_time": 150,
@@ -338,7 +338,7 @@
         "eff": 150,
         "config": {
           "buy_amounts_pct": [
-            "1"
+            "1.0"
           ],
           "buy_cooldown_time": 10,
           "buy_position_effectivization_time": 150,
@@ -351,11 +351,11 @@
           "executor_refresh_time": 60,
           "global_pnl_reference": "position",
           "global_sl_activation_from": "target_base",
-          "global_sl_enabled": true,
+          "global_sl_enabled": false,
           "global_stop_loss": "0.01",
           "global_take_profit": "0.005",
           "global_tp_activation_from": "min_base",
-          "global_tp_enabled": true,
+          "global_tp_enabled": false,
           "id": "btcbrl-cs5-vol",
           "initial_positions": [],
           "leverage": 1,
@@ -367,12 +367,12 @@
           "open_order_type": 3,
           "portfolio_allocation": 0.0833,
           "position_mode": "ONEWAY",
-          "position_profit_protection": true,
+          "position_profit_protection": false,
           "position_side": "BUY",
           "price_distance_tolerance": "0.0003",
           "refresh_tolerance": "0.0012",
           "sell_amounts_pct": [
-            "1"
+            "1.0"
           ],
           "sell_cooldown_time": 10,
           "sell_position_effectivization_time": 150,
@@ -395,7 +395,7 @@
         "eff": 300,
         "config": {
           "buy_amounts_pct": [
-            "1"
+            "1.0"
           ],
           "buy_cooldown_time": 10,
           "buy_position_effectivization_time": 300,
@@ -408,11 +408,11 @@
           "executor_refresh_time": 60,
           "global_pnl_reference": "position",
           "global_sl_activation_from": "target_base",
-          "global_sl_enabled": true,
+          "global_sl_enabled": false,
           "global_stop_loss": "0.01",
           "global_take_profit": "0.005",
           "global_tp_activation_from": "min_base",
-          "global_tp_enabled": true,
+          "global_tp_enabled": false,
           "id": "btcbrl-cs6-pnl",
           "initial_positions": [],
           "leverage": 1,
@@ -424,12 +424,12 @@
           "open_order_type": 3,
           "portfolio_allocation": 0.0833,
           "position_mode": "ONEWAY",
-          "position_profit_protection": true,
+          "position_profit_protection": false,
           "position_side": "BUY",
           "price_distance_tolerance": "0.0003",
           "refresh_tolerance": "0.0012",
           "sell_amounts_pct": [
-            "1"
+            "1.0"
           ],
           "sell_cooldown_time": 10,
           "sell_position_effectivization_time": 300,
@@ -452,7 +452,7 @@
         "eff": 300,
         "config": {
           "buy_amounts_pct": [
-            "1"
+            "1.0"
           ],
           "buy_cooldown_time": 10,
           "buy_position_effectivization_time": 300,
@@ -465,11 +465,11 @@
           "executor_refresh_time": 60,
           "global_pnl_reference": "position",
           "global_sl_activation_from": "target_base",
-          "global_sl_enabled": true,
+          "global_sl_enabled": false,
           "global_stop_loss": "0.01",
           "global_take_profit": "0.005",
           "global_tp_activation_from": "min_base",
-          "global_tp_enabled": true,
+          "global_tp_enabled": false,
           "id": "btcbrl-cs7-pnl",
           "initial_positions": [],
           "leverage": 1,
@@ -481,12 +481,12 @@
           "open_order_type": 3,
           "portfolio_allocation": 0.0833,
           "position_mode": "ONEWAY",
-          "position_profit_protection": true,
+          "position_profit_protection": false,
           "position_side": "BUY",
           "price_distance_tolerance": "0.0003",
           "refresh_tolerance": "0.0012",
           "sell_amounts_pct": [
-            "1"
+            "1.0"
           ],
           "sell_cooldown_time": 10,
           "sell_position_effectivization_time": 300,
@@ -509,7 +509,7 @@
         "eff": 900,
         "config": {
           "buy_amounts_pct": [
-            "1"
+            "1.0"
           ],
           "buy_cooldown_time": 10,
           "buy_position_effectivization_time": 900,
@@ -522,11 +522,11 @@
           "executor_refresh_time": 60,
           "global_pnl_reference": "position",
           "global_sl_activation_from": "target_base",
-          "global_sl_enabled": true,
+          "global_sl_enabled": false,
           "global_stop_loss": "0.01",
           "global_take_profit": "0.005",
           "global_tp_activation_from": "min_base",
-          "global_tp_enabled": true,
+          "global_tp_enabled": false,
           "id": "btcbrl-cs8-pnl",
           "initial_positions": [],
           "leverage": 1,
@@ -538,12 +538,12 @@
           "open_order_type": 3,
           "portfolio_allocation": 0.0833,
           "position_mode": "ONEWAY",
-          "position_profit_protection": true,
+          "position_profit_protection": false,
           "position_side": "BUY",
           "price_distance_tolerance": "0.0003",
           "refresh_tolerance": "0.0012",
           "sell_amounts_pct": [
-            "1"
+            "1.0"
           ],
           "sell_cooldown_time": 10,
           "sell_position_effectivization_time": 900,
@@ -566,7 +566,7 @@
         "eff": 900,
         "config": {
           "buy_amounts_pct": [
-            "1"
+            "1.0"
           ],
           "buy_cooldown_time": 10,
           "buy_position_effectivization_time": 900,
@@ -579,11 +579,11 @@
           "executor_refresh_time": 60,
           "global_pnl_reference": "position",
           "global_sl_activation_from": "target_base",
-          "global_sl_enabled": true,
+          "global_sl_enabled": false,
           "global_stop_loss": "0.01",
           "global_take_profit": "0.005",
           "global_tp_activation_from": "min_base",
-          "global_tp_enabled": true,
+          "global_tp_enabled": false,
           "id": "btcbrl-cs9-pnl",
           "initial_positions": [],
           "leverage": 1,
@@ -595,12 +595,12 @@
           "open_order_type": 3,
           "portfolio_allocation": 0.0833,
           "position_mode": "ONEWAY",
-          "position_profit_protection": true,
+          "position_profit_protection": false,
           "position_side": "BUY",
           "price_distance_tolerance": "0.0003",
           "refresh_tolerance": "0.0012",
           "sell_amounts_pct": [
-            "1"
+            "1.0"
           ],
           "sell_cooldown_time": 10,
           "sell_position_effectivization_time": 900,
@@ -623,7 +623,7 @@
         "eff": 600,
         "config": {
           "buy_amounts_pct": [
-            "1"
+            "1.0"
           ],
           "buy_cooldown_time": 10,
           "buy_position_effectivization_time": 600,
@@ -636,11 +636,11 @@
           "executor_refresh_time": 60,
           "global_pnl_reference": "position",
           "global_sl_activation_from": "target_base",
-          "global_sl_enabled": true,
+          "global_sl_enabled": false,
           "global_stop_loss": "0.01",
           "global_take_profit": "0.005",
           "global_tp_activation_from": "min_base",
-          "global_tp_enabled": true,
+          "global_tp_enabled": false,
           "id": "btcbrl-cs10-pnl",
           "initial_positions": [],
           "leverage": 1,
@@ -652,12 +652,12 @@
           "open_order_type": 3,
           "portfolio_allocation": 0.0833,
           "position_mode": "ONEWAY",
-          "position_profit_protection": true,
+          "position_profit_protection": false,
           "position_side": "BUY",
           "price_distance_tolerance": "0.0003",
           "refresh_tolerance": "0.0012",
           "sell_amounts_pct": [
-            "1"
+            "1.0"
           ],
           "sell_cooldown_time": 10,
           "sell_position_effectivization_time": 600,
@@ -680,7 +680,7 @@
         "eff": 300,
         "config": {
           "buy_amounts_pct": [
-            "1"
+            "1.0"
           ],
           "buy_cooldown_time": 10,
           "buy_position_effectivization_time": 300,
@@ -693,11 +693,11 @@
           "executor_refresh_time": 60,
           "global_pnl_reference": "position",
           "global_sl_activation_from": "target_base",
-          "global_sl_enabled": true,
+          "global_sl_enabled": false,
           "global_stop_loss": "0.01",
           "global_take_profit": "0.005",
           "global_tp_activation_from": "min_base",
-          "global_tp_enabled": true,
+          "global_tp_enabled": false,
           "id": "btcbrl-cs11-pnl",
           "initial_positions": [],
           "leverage": 1,
@@ -709,12 +709,12 @@
           "open_order_type": 3,
           "portfolio_allocation": 0.0833,
           "position_mode": "ONEWAY",
-          "position_profit_protection": true,
+          "position_profit_protection": false,
           "position_side": "BUY",
           "price_distance_tolerance": "0.0003",
           "refresh_tolerance": "0.0012",
           "sell_amounts_pct": [
-            "1"
+            "1.0"
           ],
           "sell_cooldown_time": 10,
           "sell_position_effectivization_time": 300,
@@ -731,6 +731,7 @@
         }
       }
     ],
-    "_comment_cold_start": "12 relaunch controllers: top-6 by backtest volume + top-6 by backtest PnL (tgtB fixed 0.65). Deployed on GO."
+    "_comment_cold_start": "12 relaunch controllers: top-6 by backtest volume + top-6 by backtest PnL (tgtB fixed 0.65). Deployed on GO.",
+    "_comment_riskflags": "per-controller global SL/TP/protection DISABLED (caused 0 executors); risk is at the manager level (brake + -6000 kill)."
   }
 }
