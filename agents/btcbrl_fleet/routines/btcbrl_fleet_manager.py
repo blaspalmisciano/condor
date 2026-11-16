@@ -84,6 +84,28 @@ def _norm(cfg: dict) -> dict:
     return c
 
 
+def _schema_keys(ps: dict) -> set:
+    """Valid pmm_mister config fields = the union of keys across the cold-start configs — the exact
+    shape that deploys cleanly via create_or_update_controller_config. A LIVE-read config (from
+    gather_active) additionally carries '_config_name' (= the controller id), which the controller
+    config model rejects as extra_forbidden; building a sub from it is what stopped the fleet."""
+    keys = set()
+    for item in ps.get("cold_start", []) or []:
+        keys |= set((item.get("config") or {}).keys())
+    return keys
+
+
+def _clean_to_schema(cfg: dict, allowed: set, cid: str, alloc) -> dict:
+    """Write-safe config for a substitution: keep ONLY valid schema fields (dropping live-read extras
+    such as '_config_name'), then pin id + portfolio_allocation to the target slot. Produces the same
+    clean shape the cold-start deploy uses, so create_or_update/update_bot_controller_config accept it."""
+    base = {k: v for k, v in cfg.items() if k in allowed} if allowed else dict(cfg)
+    base["id"] = cid
+    if alloc is not None:
+        base["portfolio_allocation"] = alloc
+    return _norm(base)
+
+
 def invariant_ok(cfg: dict) -> bool:
     """Hard invariant: only ever touch a pmm_mister controller on BTC-BRL."""
     return cfg.get("controller_name") == "pmm_mister" and (cfg.get("trading_pair") or "").upper() == PAIR
@@ -106,35 +128,70 @@ def load_spec() -> dict:
 
 # --------------------------------------------------------------- read_live (blip-proof)
 async def read_live(c, log):
-    """(fleet, status_ok, cfg_ok). Per-controller PnL/volume from get_active_bots_status's nested
-    performance (survives MQTT blips); configs from gather_active. Both reads must succeed before we
-    dare conclude 'no fleet exists' and cold-start."""
-    perf_by, bot_by, status_ok = {}, {}, False
-    try:
-        status = await c.bot_orchestration.get_active_bots_status()
-        bots = status.get("data", status) if isinstance(status, dict) else status
-        if isinstance(bots, dict):
-            status_ok = True
-            for bot, info in bots.items():
-                perf = (info or {}).get("performance", {})
-                if not isinstance(perf, dict):
-                    continue
-                for cid, p in perf.items():
-                    inner = (p or {}).get("performance", {}) if isinstance(p, dict) else {}
-                    if not isinstance(inner, dict):
-                        continue
-                    perf_by[cid] = {"pnl": float(inner.get("global_pnl_quote", 0) or 0),
-                                    "vol": float(inner.get("volume_traded", 0) or 0)}
-                    bot_by[cid] = bot
-    except Exception as e:
-        log(f"  (get_active_bots_status failed: {str(e)[:80]})")
-
+    """(fleet, status_ok, cfg_ok). Per-controller PnL/volume is read from
+    get_latest_controller_performance — the DB-side route, which keeps reporting real volume/PnL during
+    the MQTT blackouts that make get_active_bots_status return 0 (the telemetry blindness that let the
+    manager mistake a busily-trading fleet for a dead one). The live-status feed is kept only as a
+    fallback. status_ok still reflects whether the status API is REACHABLE (not whether perf came back),
+    so the empty-fleet cold-start path and the dup-fleet read-fail guard behave exactly as before.
+    Configs come from gather_active."""
+    # --- configs + bot roster ---
     cfg_by, cid_bot, cfg_ok = {}, {}, False
     try:
         _lp, cfg_by, _bn, _h, cid_bot = await gather_active(c)
         cfg_ok = True
     except Exception as e:
         log(f"  (gather_active failed: {str(e)[:60]})")
+
+    # live-status feed: gates status_ok (API reachable) and seeds the bot roster + fallback perf
+    status_ok, status_bots = False, {}
+    bot_names = {b for b in cid_bot.values() if b}
+    try:
+        status = await c.bot_orchestration.get_active_bots_status()
+        bots = status.get("data", status) if isinstance(status, dict) else status
+        if isinstance(bots, dict):
+            status_ok = True
+            status_bots = bots
+            bot_names |= {b for b in bots.keys() if b}
+    except Exception as e:
+        log(f"  (get_active_bots_status failed: {str(e)[:80]})")
+
+    # --- PRIMARY perf: get_latest_controller_performance (MQTT-independent) ---
+    perf_by, bot_by = {}, {}
+    for bot in bot_names:
+        try:
+            r = await c.bot_orchestration.get_latest_controller_performance(bot_name=bot)
+            rows = r.get("data", r) if isinstance(r, dict) else r
+            if not isinstance(rows, list):
+                continue
+            for row in rows:
+                if not isinstance(row, dict):
+                    continue
+                cid = row.get("controller_id") or row.get("controller")
+                perf = row.get("performance") if isinstance(row.get("performance"), dict) else None
+                if not cid or not perf:
+                    continue
+                perf_by[cid] = {"pnl": float(perf.get("global_pnl_quote", 0) or 0),
+                                "vol": float(perf.get("volume_traded", 0) or 0)}
+                bot_by[cid] = bot
+        except Exception as e:
+            log(f"  (controller_performance[{bot[:24]}] failed: {str(e)[:60]})")
+
+    # --- FALLBACK perf: live-status feed's nested performance (only if DB-side route gave nothing) ---
+    if not perf_by and isinstance(status_bots, dict):
+        for bot, info in status_bots.items():
+            perf = (info or {}).get("performance", {})
+            if not isinstance(perf, dict):
+                continue
+            for cid, p in perf.items():
+                inner = (p or {}).get("performance", {}) if isinstance(p, dict) else {}
+                if not isinstance(inner, dict):
+                    continue
+                perf_by[cid] = {"pnl": float(inner.get("global_pnl_quote", 0) or 0),
+                                "vol": float(inner.get("volume_traded", 0) or 0)}
+                bot_by[cid] = bot
+        if perf_by:
+            log("  (perf re-sourced from live-status feed fallback — controller_performance was empty)")
 
     fleet, unclassified = {}, 0
     for cid, p in perf_by.items():
@@ -222,6 +279,7 @@ def plan_substitution(fleet: dict, yields: dict, ps: dict, bench_sides: dict) ->
     sub = ps["substitution"]
     thresh = float(sub["yield_threshold"])
     explore_ratio = float(sub["replacement_pool"]["explore_backtest_candidate_ratio"])
+    allowed = _schema_keys(ps)   # whitelist: strip live-read extras (e.g. _config_name) before writing
 
     cohorts = {"vol": [], "pnl": []}
     unclassified = []
@@ -255,13 +313,13 @@ def plan_substitution(fleet: dict, yields: dict, ps: dict, bench_sides: dict) ->
         win = winners.get(co)
         desired, src = None, None
         if idx < n_explore and side_bench:
-            desired = _norm({**side_bench[idx % len(side_bench)], "id": cid, "portfolio_allocation": loser["alloc"]})
+            desired = _clean_to_schema(side_bench[idx % len(side_bench)], allowed, cid, loser["alloc"])
             src = f"explore({co} backtest candidate)"
         elif win and win != cid:
-            desired = _norm({**fleet[win]["cfg"], "id": cid, "portfolio_allocation": loser["alloc"]})
+            desired = _clean_to_schema(fleet[win]["cfg"], allowed, cid, loser["alloc"])
             src = f"exploit({co} live winner {win[:16]})"
         elif side_bench:
-            desired = _norm({**side_bench[idx % len(side_bench)], "id": cid, "portfolio_allocation": loser["alloc"]})
+            desired = _clean_to_schema(side_bench[idx % len(side_bench)], allowed, cid, loser["alloc"])
             src = f"explore({co} bench — no cohort winner)"
         else:
             plan.append({"cid": cid, "cohort": co, "src": "refuse", "why": "no same-side target"}); continue
